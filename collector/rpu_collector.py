@@ -1,0 +1,954 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""RemotePU Linux collector — protocol NDJSON v1.
+
+Runs on the monitored host (usually piped in over ssh: `python3 -u - --interval 1`)
+and streams one JSON object per line to stdout: a `hello` with static info, then a
+sample (`"t":"s"`) every --interval seconds. Non-fatal problems are reported as
+`{"t":"err",...}` lines. Exits as soon as stdout is closed (ssh went away).
+
+Python 3.6+, standard library only. Never needs root; anything unreadable is null.
+"""
+import argparse
+import csv
+import glob
+import json
+import os
+import platform
+import re
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+VERSION = "0.1.0"
+PROTOCOL = 1
+
+NVIDIA_SMI_CANDIDATES = [
+    "/usr/lib/wsl/lib/nvidia-smi",  # WSL2: not on PATH for non-interactive ssh
+    "/usr/bin/nvidia-smi",
+    "/usr/local/nvidia/bin/nvidia-smi",
+    "/usr/local/bin/nvidia-smi",
+    "/opt/nvidia/bin/nvidia-smi",
+]
+
+# clocks_event_reasons (formerly clocks_throttle_reasons) bitmask.
+THROTTLE_BITS = [
+    (0x1, "gpu_idle"),
+    (0x2, "app_clocks"),
+    (0x4, "sw_power_cap"),
+    (0x8, "hw_slowdown"),
+    (0x10, "sync_boost"),
+    (0x20, "sw_thermal"),
+    (0x40, "hw_thermal"),
+    (0x80, "hw_power_brake"),
+    (0x100, "display_clocks"),
+]
+
+NA_VALUES = ("", "N/A", "[N/A]", "Not Supported", "[Not Supported]", "[Unknown Error]",
+             "[Insufficient Permissions]", "[Not Found]", "Unknown Error")
+
+MIB = 1024 * 1024
+
+
+# --------------------------------------------------------------------------- utils
+
+class Paths(object):
+    """Prefix for /proc and /sys so tests can point the collector at fixtures."""
+
+    def __init__(self, root=None):
+        self.root = (root or "").rstrip("/")
+
+    def p(self, path):
+        return self.root + path
+
+
+def read_text(path, default=None):
+    try:
+        with open(path, "r") as f:
+            return f.read()
+    except (IOError, OSError, UnicodeDecodeError):
+        return default
+
+
+def read_int(path):
+    text = read_text(path)
+    if text is None:
+        return None
+    try:
+        return int(text.strip())
+    except ValueError:
+        return None
+
+
+def parse_cpu_list(text):
+    """'0-3,8,10-11' -> [0, 1, 2, 3, 8, 10, 11]."""
+    cpus = []
+    for part in (text or "").strip().split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                cpus.extend(range(int(a), int(b) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                cpus.append(int(part))
+            except ValueError:
+                pass
+    return cpus
+
+
+def nv_num(text):
+    """Parse a nvidia-smi csv value (nounits); N/A-like values become None."""
+    s = (text or "").strip()
+    if s in NA_VALUES or s.startswith("["):
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if v != v:  # NaN
+        return None
+    return v
+
+
+def nv_str(text):
+    s = (text or "").strip()
+    if s in NA_VALUES or s.startswith("["):
+        return None
+    return s
+
+
+def nv_int(text):
+    v = nv_num(text)
+    return None if v is None else int(v)
+
+
+def decode_throttle(text):
+    s = (text or "").strip()
+    if s in NA_VALUES or s.startswith("["):
+        return None
+    try:
+        mask = int(s, 16) if s.lower().startswith("0x") else int(s)
+    except ValueError:
+        return None
+    return [name for bit, name in THROTTLE_BITS if mask & bit]
+
+
+def round_or_none(v, nd=1):
+    return None if v is None else round(v, nd)
+
+
+# --------------------------------------------------------------------------- CPU
+
+def parse_proc_stat(text):
+    """Return (total, cores); each entry is (busy_jiffies, total_jiffies)."""
+    total = None
+    cores = []
+    for line in (text or "").splitlines():
+        if not line.startswith("cpu"):
+            continue
+        parts = line.split()
+        try:
+            vals = [int(x) for x in parts[1:]]
+        except ValueError:
+            continue
+        if len(vals) < 4:
+            continue
+        # user nice system idle iowait irq softirq steal [guest guest_nice]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        tot = sum(vals[:8])  # guest time is already included in user/nice
+        if parts[0] == "cpu":
+            total = (tot - idle, tot)
+        else:
+            cores.append((tot - idle, tot))
+    return total, cores
+
+
+def util_between(prev, cur):
+    if prev is None or cur is None:
+        return None
+    busy = cur[0] - prev[0]
+    tot = cur[1] - prev[1]
+    if tot <= 0:
+        return None
+    return max(0.0, min(100.0, 100.0 * busy / tot))
+
+
+def cpu_model(paths):
+    text = read_text(paths.p("/proc/cpuinfo"), "") or ""
+    for key in ("model name", "cpu model", "hardware", "model"):
+        for line in text.splitlines():
+            if ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            if k.strip().lower() == key and v.strip():
+                return v.strip()
+    try:
+        out = subprocess.check_output(["lscpu"], stderr=subprocess.DEVNULL, universal_newlines=True)
+        for line in out.splitlines():
+            if line.lower().startswith("model name:"):
+                return line.split(":", 1)[1].strip()
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return platform.processor() or None
+
+
+# Arm (implementer 0x41) part numbers seen in GPU servers / workstations.
+ARM_PARTS = {
+    0xd0c: "Neoverse-N1", 0xd40: "Neoverse-V1", 0xd49: "Neoverse-N2", 0xd4f: "Neoverse-V2",
+    0xd84: "Neoverse-V3", 0xd8e: "Neoverse-N3", 0xd41: "Cortex-A78", 0xd44: "Cortex-X1",
+    0xd46: "Cortex-A510", 0xd47: "Cortex-A710", 0xd48: "Cortex-X2", 0xd4d: "Cortex-A715",
+    0xd4e: "Cortex-X3", 0xd80: "Cortex-A520", 0xd81: "Cortex-A720", 0xd82: "Cortex-X4",
+    0xd85: "Cortex-X925", 0xd87: "Cortex-A725", 0xd05: "Cortex-A55", 0xd0b: "Cortex-A76",
+}
+
+
+def arm_core_types(paths, ncores):
+    """cpu index -> core type name from MIDR_EL1 (None when not an Arm big.LITTLE box)."""
+    types = {}
+    for i in range(ncores):
+        raw = read_text(paths.p("/sys/devices/system/cpu/cpu%d/regs/identification/midr_el1" % i))
+        if not raw:
+            return None
+        try:
+            midr = int(raw.strip(), 16)
+        except ValueError:
+            return None
+        part = (midr >> 4) & 0xFFF
+        types[i] = ARM_PARTS.get(part, "Arm 0x%03x" % part) if (midr >> 24) & 0xFF == 0x41 \
+            else "core 0x%02x/0x%03x" % ((midr >> 24) & 0xFF, part)
+    return types
+
+
+def cpu_clusters(paths, ncores):
+    """Core groups: Intel hybrid P/E lists, Arm core types (big.LITTLE), else one cluster."""
+    core = read_text(paths.p("/sys/devices/cpu_core/cpus"))
+    atom = read_text(paths.p("/sys/devices/cpu_atom/cpus"))
+    if core and atom:
+        return [("P-core", parse_cpu_list(core)), ("E-core", parse_cpu_list(atom))]
+    types = arm_core_types(paths, ncores)
+    if types and len(set(types.values())) > 1:
+        groups = []
+        for i in range(ncores):
+            for name, cpus in groups:
+                if name == types[i]:
+                    cpus.append(i)
+                    break
+            else:
+                groups.append((types[i], [i]))
+        return groups
+    return [("CPU", list(range(ncores)))]
+
+
+class CpuFreq(object):
+    def __init__(self, paths, allow_cpuinfo):
+        self.paths = paths
+        self.files = sorted(glob.glob(paths.p("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq")))
+        self.allow_cpuinfo = allow_cpuinfo
+
+    @property
+    def available(self):
+        return bool(self.files) or self.allow_cpuinfo
+
+    def read(self):
+        vals = []
+        for f in self.files:
+            v = read_int(f)
+            if v:
+                vals.append(v / 1000.0)
+        if not vals and self.allow_cpuinfo:
+            text = read_text(self.paths.p("/proc/cpuinfo"), "") or ""
+            for line in text.splitlines():
+                if line.lower().startswith("cpu mhz") and ":" in line:
+                    try:
+                        vals.append(float(line.split(":", 1)[1]))
+                    except ValueError:
+                        pass
+        return round(sum(vals) / len(vals)) if vals else None
+
+
+def _hwmon_devices(paths):
+    devs = []
+    for d in sorted(glob.glob(paths.p("/sys/class/hwmon/hwmon*"))):
+        name = (read_text(os.path.join(d, "name"), "") or "").strip()
+        temps = []
+        for inp in sorted(glob.glob(os.path.join(d, "temp*_input"))):
+            label = (read_text(inp[:-len("_input")] + "_label", "") or "").strip()
+            temps.append((label, inp))
+        fans = []
+        for inp in sorted(glob.glob(os.path.join(d, "fan*_input"))):
+            label = (read_text(inp[:-len("_input")] + "_label", "") or "").strip()
+            fans.append((label, inp))
+        devs.append((name, temps, fans))
+    return devs
+
+
+def discover_cpu_temp(paths):
+    """Return a list of *_input files whose max is the CPU temperature."""
+    devs = _hwmon_devices(paths)
+
+    def pick(name, temps):
+        labels = [(l.lower(), p) for l, p in temps]
+        if name == "coretemp":
+            pkg = [p for l, p in labels if l.startswith("package")]
+            return pkg or [p for _, p in labels]
+        if name in ("k10temp", "zenpower"):
+            for want in ("tdie", "tctl"):
+                hit = [p for l, p in labels if l == want]
+                if hit:
+                    return hit
+            return [p for _, p in labels[:1]]
+        return [p for _, p in labels]
+
+    for want in ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal", "soc_thermal"):
+        files = []
+        for name, temps, _ in devs:
+            if name == want:
+                files.extend(pick(name, temps))
+        if files:
+            return files
+
+    zones = []
+    for z in sorted(glob.glob(paths.p("/sys/class/thermal/thermal_zone*"))):
+        zones.append(((read_text(os.path.join(z, "type"), "") or "").strip(), os.path.join(z, "temp")))
+    for wanted in (("x86_pkg_temp",), ("cpu-thermal", "cpu_thermal", "cpu0-thermal", "soc-thermal"), ("acpitz",)):
+        files = [f for t, f in zones if t in wanted]
+        if files:
+            return files
+    return []
+
+
+def read_temp(files):
+    vals = []
+    for f in files:
+        v = read_int(f)
+        if v is not None and 1000 < v < 150000:
+            vals.append(v / 1000.0)
+    return round(max(vals), 1) if vals else None
+
+
+def discover_fans(paths):
+    fans = []
+    for name, _, fan_inputs in _hwmon_devices(paths):
+        for label, inp in fan_inputs:
+            fans.append((label or name, inp))
+    return fans
+
+
+class Rapl(object):
+    """CPU package power from powercap energy counters (usually root-only)."""
+
+    def __init__(self, paths):
+        self.zones = []
+        for d in sorted(glob.glob(paths.p("/sys/class/powercap/intel-rapl:*"))):
+            if not re.search(r"intel-rapl:\d+$", d):
+                continue  # skip sub-zones (core/uncore/dram)
+            energy = os.path.join(d, "energy_uj")
+            if read_int(energy) is None:
+                continue
+            self.zones.append((energy, read_int(os.path.join(d, "max_energy_range_uj")) or 0))
+        self.prev = None
+
+    @property
+    def available(self):
+        return bool(self.zones)
+
+    def read(self):
+        if not self.zones:
+            return None
+        now = time.monotonic()
+        vals = [read_int(e) for e, _ in self.zones]
+        if any(v is None for v in vals):
+            return None
+        result = None
+        if self.prev is not None:
+            t0, prev_vals = self.prev
+            dt = now - t0
+            if dt > 0:
+                total = 0
+                for (_, rng), a, b in zip(self.zones, prev_vals, vals):
+                    d = b - a
+                    if d < 0:
+                        d += rng
+                    total += d
+                result = round(total / 1e6 / dt, 1)
+        self.prev = (now, vals)
+        return result
+
+
+# --------------------------------------------------------------------------- memory
+
+def read_meminfo(paths):
+    info = {}
+    for line in (read_text(paths.p("/proc/meminfo"), "") or "").splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        parts = v.split()
+        if not parts:
+            continue
+        try:
+            n = int(parts[0])
+        except ValueError:
+            continue
+        info[k.strip()] = n * 1024 if (len(parts) > 1 and parts[1].lower() == "kb") else n
+    total = info.get("MemTotal")
+    avail = info.get("MemAvailable")
+    if avail is None and total is not None:
+        avail = info.get("MemFree", 0) + info.get("Buffers", 0) + info.get("Cached", 0)
+    swap_total = info.get("SwapTotal")
+    swap_free = info.get("SwapFree")
+    return {
+        "total": total,
+        "available": avail,
+        "used": (total - avail) if (total is not None and avail is not None) else None,
+        "swap_total": swap_total,
+        "swap_used": (swap_total - swap_free) if (swap_total is not None and swap_free is not None) else None,
+    }
+
+
+# --------------------------------------------------------------------------- NVIDIA
+
+def find_nvidia_smi(override=None):
+    if override:
+        return override if os.access(override, os.X_OK) else None
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        c = os.path.join(d, "nvidia-smi")
+        if d and os.access(c, os.X_OK):
+            return c
+    for c in NVIDIA_SMI_CANDIDATES:
+        if os.access(c, os.X_OK):
+            return c
+    return None
+
+
+INVALID_FIELD_RE = re.compile(r'Field "([^"]+)" is not a valid field')
+
+STATIC_FIELDS = ["index", "uuid", "name", "driver_version", "memory.total", "power.limit",
+                 "clocks.max.sm", "pci.bus_id"]
+
+# (nvidia-smi field, protocol key, parser)
+DYNAMIC_FIELDS = [
+    ("index", "idx", nv_int),
+    ("utilization.gpu", "util", nv_num),
+    ("utilization.memory", "mem_util", nv_num),
+    ("memory.used", "mem_used", nv_num),
+    ("memory.total", "mem_total", nv_num),
+    ("temperature.gpu", "temp_c", nv_num),
+    ("temperature.memory", "mem_temp_c", nv_num),
+    ("power.draw", "power_w", nv_num),
+    ("power.limit", "power_limit_w", nv_num),
+    ("clocks.sm", "sm_mhz", nv_num),
+    ("clocks.mem", "mem_mhz", nv_num),
+    ("fan.speed", "fan_pct", nv_num),
+    ("pstate", "pstate", nv_str),
+    ("clocks_event_reasons.active", "throttle", decode_throttle),
+    ("pcie.link.gen.current", "pcie_gen", nv_int),
+    ("pcie.link.width.current", "pcie_width", nv_int),
+]
+
+MEMORY_KEYS = ("mem_used", "mem_total")
+
+
+def csv_rows(text):
+    rows = []
+    for row in csv.reader((text or "").splitlines(), skipinitialspace=True):
+        if row:
+            rows.append([c.strip() for c in row])
+    return rows
+
+
+class NvidiaSmi(object):
+    def __init__(self, path, timeout=15):
+        self.path = path
+        self.timeout = timeout
+
+    def _run(self, args):
+        p = subprocess.Popen([self.path] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             universal_newlines=True)
+        try:
+            out, err = p.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            return 124, "", "nvidia-smi timed out"
+        return p.returncode, out, err
+
+    def supported_fields(self):
+        rc, out, _ = self._run(["--help-query-gpu"])
+        if rc != 0:
+            return None
+        found = set(re.findall(r'"([a-z0-9_.]+)"', out))
+        return found or None
+
+    def query(self, fields):
+        """Run a one-shot query, dropping fields the driver rejects. Returns (fields, rows, error)."""
+        fields = list(fields)
+        for _ in range(len(fields)):
+            rc, out, err = self._run(["--query-gpu=" + ",".join(fields), "--format=csv,noheader,nounits"])
+            if rc == 0:
+                return fields, csv_rows(out), None
+            m = INVALID_FIELD_RE.search(err + out)
+            if m and m.group(1) in fields and m.group(1) != "index":
+                fields.remove(m.group(1))
+                continue
+            return fields, [], (err or out).strip() or ("nvidia-smi exited with %d" % rc)
+        return fields, [], "no valid nvidia-smi fields"
+
+
+def resolve_dynamic_fields(smi):
+    supported = smi.supported_fields()
+    wanted = []
+    for field, key, parser in DYNAMIC_FIELDS:
+        if field == "clocks_event_reasons.active" and supported is not None \
+                and field not in supported and "clocks_throttle_reasons.active" in supported:
+            field = "clocks_throttle_reasons.active"
+        if supported is None or field in supported or field == "index":
+            wanted.append((field, key, parser))
+    names, rows, err = smi.query([f for f, _, _ in wanted])
+    return [w for w in wanted if w[0] in names], rows, err
+
+
+def parse_dynamic_row(fields, row):
+    if len(row) != len(fields):
+        return None
+    out = {}
+    for (_, key, parser), raw in zip(fields, row):
+        out[key] = parser(raw)
+    if out.get("idx") is None:
+        return None
+    for k in MEMORY_KEYS:
+        if out.get(k) is not None:
+            out[k] = out[k] * MIB
+    return out
+
+
+def parse_static_rows(fields, rows):
+    gpus = []
+    for row in rows:
+        if len(row) != len(fields):
+            continue
+        d = dict(zip(fields, row))
+        idx = nv_int(d.get("index"))
+        if idx is None:
+            continue
+        mem_total = nv_num(d.get("memory.total"))
+        gpus.append({
+            "idx": idx,
+            "uuid": nv_str(d.get("uuid")),
+            "name": nv_str(d.get("name")),
+            "mem_total": None if mem_total is None else mem_total * MIB,
+            "driver": nv_str(d.get("driver_version")),
+            "power_limit_w": nv_num(d.get("power.limit")),
+            "max_sm_mhz": nv_num(d.get("clocks.max.sm")),
+            "pci_bus": nv_str(d.get("pci.bus_id")),
+            "unified": mem_total is None,
+        })
+    return gpus
+
+
+class ComputeAppsMemory(threading.Thread):
+    """Per-GPU memory summed over compute processes, for unified-memory GPUs (GB10…)
+    where memory.used is N/A. Polled slowly; values are bytes keyed by GPU uuid."""
+
+    def __init__(self, smi, period):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.smi = smi
+        self.period = period
+        self.lock = threading.Lock()
+        self.by_uuid = {}
+        self.stopped = threading.Event()
+
+    def poll(self):
+        rc, out, _ = self.smi._run(["--query-compute-apps=gpu_uuid,used_memory", "--format=csv,noheader,nounits"])
+        if rc != 0:
+            return
+        sums = {}
+        for row in csv_rows(out):
+            if len(row) != 2:
+                continue
+            mib = nv_num(row[1])
+            if mib is not None:
+                sums[row[0]] = sums.get(row[0], 0) + mib * MIB
+        with self.lock:
+            self.by_uuid = sums
+
+    def get(self, uuid):
+        with self.lock:
+            return self.by_uuid.get(uuid)
+
+    def run(self):
+        while not self.stopped.is_set():
+            self.poll()
+            self.stopped.wait(self.period)
+
+    def stop(self):
+        self.stopped.set()
+
+
+class GpuStream(threading.Thread):
+    """Keeps the latest per-GPU readings from one long-running `nvidia-smi -lms`.
+
+    Falls back to polling (one nvidia-smi per tick) when the streaming process
+    produces nothing, and restarts it with backoff when it dies.
+    """
+
+    def __init__(self, smi, fields, interval, report):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.smi = smi
+        self.fields = fields
+        self.interval = interval
+        self.report = report
+        self.lock = threading.Lock()
+        self.latest = {}
+        self.proc = None
+        self.stopped = threading.Event()
+        self.mode = "stream"
+
+    def stop(self):
+        self.stopped.set()
+        p = self.proc
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+    def store(self, row):
+        parsed = parse_dynamic_row(self.fields, row)
+        if parsed is not None:
+            with self.lock:
+                self.latest[parsed["idx"]] = (time.monotonic(), parsed)
+
+    def snapshot(self, max_age):
+        now = time.monotonic()
+        with self.lock:
+            items = sorted(self.latest.items())
+        return [d for _, (t, d) in items if now - t <= max_age]
+
+    def run(self):
+        backoff = 1.0
+        names = ",".join(f for f, _, _ in self.fields)
+        while not self.stopped.is_set():
+            if self.mode == "poll":
+                started = time.monotonic()
+                _, rows, err = self.smi.query([f for f, _, _ in self.fields])
+                for row in rows:
+                    self.store(row)
+                if err:
+                    self.report("nvidia-smi: " + err)
+                self.stopped.wait(max(0.05, self.interval - (time.monotonic() - started)))
+                continue
+
+            ms = max(100, int(self.interval * 1000))
+            try:
+                self.proc = subprocess.Popen(
+                    [self.smi.path, "--query-gpu=" + names, "--format=csv,noheader,nounits", "-lms", str(ms)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1)
+            except OSError as e:
+                self.report("cannot start nvidia-smi: %s" % e)
+                self.stopped.wait(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+
+            err_lines = []
+            drain = threading.Thread(target=lambda p=self.proc: err_lines.extend(p.stderr.readlines()))
+            drain.daemon = True
+            drain.start()
+
+            # Detect a stream that never produces output (e.g. a driver that
+            # block-buffers when stdout is a pipe) and switch to polling.
+            got_line = threading.Event()
+
+            def watchdog(p=self.proc):
+                if not got_line.wait(max(5.0, 5 * self.interval)) and p.poll() is None \
+                        and not self.stopped.is_set():
+                    self.mode = "poll"
+                    self.report("nvidia-smi stream silent; switching to polling")
+                    p.kill()
+
+            wd = threading.Thread(target=watchdog)
+            wd.daemon = True
+            wd.start()
+
+            for line in self.proc.stdout:
+                got_line.set()
+                backoff = 1.0
+                rows = csv_rows(line)
+                if rows:
+                    self.store(rows[0])
+            got_line.set()
+            rc = self.proc.wait()
+            drain.join(1)
+            if self.stopped.is_set():
+                break
+            if self.mode == "stream":
+                msg = "".join(err_lines).strip()
+                self.report("nvidia-smi exited (%s)%s" % (rc, (": " + msg) if msg else ""))
+                self.stopped.wait(backoff)
+                backoff = min(backoff * 2, 30)
+
+
+# --------------------------------------------------------------------------- output
+
+class Output(object):
+    def __init__(self, stream=None):
+        self.stream = stream or sys.stdout
+        self.lock = threading.Lock()
+
+    def emit(self, obj):
+        line = json.dumps(obj, separators=(",", ":"), allow_nan=False) + "\n"
+        with self.lock:
+            try:
+                self.stream.write(line)
+                self.stream.flush()
+            except (BrokenPipeError, IOError, OSError, ValueError):
+                # The reader (ssh) is gone; exit quietly.
+                try:
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, sys.stdout.fileno())
+                except Exception:
+                    pass
+                raise SystemExit(0)
+
+    def error(self, msg, fatal=False):
+        self.emit({"t": "err", "msg": msg, "fatal": fatal})
+
+
+# --------------------------------------------------------------------------- collector
+
+def os_pretty_name(paths):
+    for line in (read_text(paths.p("/etc/os-release"), "") or "").splitlines():
+        if line.startswith("PRETTY_NAME="):
+            return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+def machine_model(paths):
+    for f in ("/sys/class/dmi/id/product_name", "/proc/device-tree/model"):
+        t = read_text(paths.p(f))
+        if t and t.strip("\x00\n ").strip():
+            return t.strip("\x00\n ").strip()
+    return None
+
+
+def is_wsl(paths):
+    rel = (read_text(paths.p("/proc/sys/kernel/osrelease"), "") or platform.release()).lower()
+    return "microsoft" in rel or "wsl" in rel
+
+
+class Collector(object):
+    def __init__(self, args, out):
+        self.args = args
+        self.out = out
+        self.paths = Paths(args.proc_root)
+        self.interval = max(0.2, float(args.interval))
+        self.wsl = is_wsl(self.paths)
+
+        _, cores = parse_proc_stat(read_text(self.paths.p("/proc/stat"), ""))
+        self.ncores = len(cores) or (os.cpu_count() or 1)
+        self.clusters = cpu_clusters(self.paths, self.ncores)
+        cpuinfo = read_text(self.paths.p("/proc/cpuinfo"), "") or ""
+        virtual = self.wsl or " hypervisor" in cpuinfo
+        self.freq = CpuFreq(self.paths, allow_cpuinfo=not virtual)
+        self.temp_files = discover_cpu_temp(self.paths)
+        self.fans = discover_fans(self.paths)
+        self.rapl = Rapl(self.paths)
+        self.prev_total = None
+        self.prev_cores = None
+        self.seq = 0
+
+        self.gpu = None
+        self.gpu_info = []
+        self.gpu_backend = None
+        self.apps_mem = None
+        if not args.no_gpu:
+            self._init_gpu()
+
+    def _init_gpu(self):
+        path = find_nvidia_smi(self.args.nvidia_smi)
+        if not path:
+            return
+        smi = NvidiaSmi(path)
+        fields, rows, err = smi.query(STATIC_FIELDS)
+        if err:
+            self.out.error("nvidia-smi: " + err)
+            return
+        self.gpu_info = parse_static_rows(fields, rows)
+        dyn_fields, rows, err = resolve_dynamic_fields(smi)
+        if err:
+            self.out.error("nvidia-smi: " + err)
+            return
+        self.gpu_backend = "nvidia-smi"
+        self.gpu = GpuStream(smi, dyn_fields, self.interval, self.out.error)
+        for row in rows:
+            self.gpu.store(row)
+        self.gpu.start()
+        if any(g.get("unified") for g in self.gpu_info):
+            self.apps_mem = ComputeAppsMemory(smi, max(5.0, self.interval))
+            self.apps_mem.poll()
+            self.apps_mem.start()
+
+    def hello(self):
+        mem = read_meminfo(self.paths)
+        return {
+            "t": "hello",
+            "v": PROTOCOL,
+            "agent": "rpu-collector/" + VERSION,
+            "host": socket.gethostname(),
+            "os": "linux",
+            "os_version": os_pretty_name(self.paths),
+            "kernel": platform.release(),
+            "arch": platform.machine(),
+            "wsl": self.wsl,
+            "model": machine_model(self.paths),
+            "cpu": {
+                "model": " + ".join(n for n, _ in self.clusters) if len(self.clusters) > 1
+                and self.clusters[0][0] != "P-core" else cpu_model(self.paths),
+                "cores": self.ncores,
+                "clusters": [{"name": n, "cores": len(c), "cpus": c} for n, c in self.clusters],
+            },
+            "mem_total": mem["total"],
+            "swap_total": mem["swap_total"],
+            "gpus": self.gpu_info,
+            "fans": len(self.fans),
+            "caps": {
+                "cpu_temp": bool(self.temp_files),
+                "cpu_freq": self.freq.available,
+                "cpu_power": self.rapl.available,
+                "gpu": self.gpu_backend,
+                "fans": bool(self.fans),
+                "sys_power": False,
+            },
+            "interval": self.interval,
+        }
+
+    def prime(self):
+        total, cores = parse_proc_stat(read_text(self.paths.p("/proc/stat"), ""))
+        self.prev_total, self.prev_cores = total, cores
+        self.rapl.read()
+
+    def sample(self):
+        total, cores = parse_proc_stat(read_text(self.paths.p("/proc/stat"), ""))
+        util = util_between(self.prev_total, total)
+        per_core = []
+        if self.prev_cores is not None and len(self.prev_cores) == len(cores):
+            per_core = [util_between(a, b) for a, b in zip(self.prev_cores, cores)]
+        self.prev_total, self.prev_cores = total, cores
+
+        clusters = []
+        for name, cpus in self.clusters:
+            vals = [per_core[i] for i in cpus if i < len(per_core) and per_core[i] is not None]
+            clusters.append({"name": name, "util": round(sum(vals) / len(vals), 1) if vals else None})
+
+        try:
+            load = [round(x, 2) for x in os.getloadavg()]
+        except OSError:
+            load = None
+
+        mem = read_meminfo(self.paths)
+        fans = []
+        for i, (label, path) in enumerate(self.fans):
+            fans.append({"idx": i, "rpm": read_int(path), "label": label or None})
+
+        gpus = []
+        if self.gpu is not None:
+            gpus = [dict(g) for g in self.gpu.snapshot(max(5.0, 5 * self.interval) + 5)]
+            if self.apps_mem is not None:
+                uuids = dict((g["idx"], g.get("uuid")) for g in self.gpu_info)
+                for g in gpus:
+                    if g.get("mem_used") is None and uuids.get(g["idx"]):
+                        used = self.apps_mem.get(uuids[g["idx"]])
+                        g["mem_used"] = used if used is not None else 0
+
+        self.seq += 1
+        return {
+            "t": "s",
+            "ts": round(time.time(), 3),
+            "seq": self.seq,
+            "cpu": {
+                "util": round_or_none(util),
+                "cores": [round_or_none(c) for c in per_core],
+                "clusters": clusters,
+                "freq_mhz": self.freq.read(),
+                "temp_c": read_temp(self.temp_files),
+                "power_w": self.rapl.read(),
+                "load": load,
+            },
+            "mem": {
+                "used": mem["used"],
+                "total": mem["total"],
+                "available": mem["available"],
+                "swap_used": mem["swap_used"],
+                "swap_total": mem["swap_total"],
+            },
+            "gpus": gpus,
+            "fans": fans,
+        }
+
+    def close(self):
+        if self.gpu is not None:
+            self.gpu.stop()
+        if self.apps_mem is not None:
+            self.apps_mem.stop()
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description="RemotePU Linux collector (NDJSON v1)")
+    ap.add_argument("--interval", type=float, default=1.0, help="seconds between samples")
+    ap.add_argument("--count", type=int, default=0, help="exit after N samples (0 = forever)")
+    ap.add_argument("--no-gpu", action="store_true", help="skip GPU collection")
+    ap.add_argument("--nvidia-smi", default=None, help="explicit nvidia-smi path")
+    ap.add_argument("--proc-root", default=None, help=argparse.SUPPRESS)  # tests only
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    out = Output()
+
+    def on_signal(signum, frame):
+        raise SystemExit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, on_signal)
+
+    collector = Collector(args, out)
+    try:
+        out.emit(collector.hello())
+        collector.prime()
+        interval = collector.interval
+        next_t = time.monotonic()
+        parent = os.getppid()
+        while True:
+            next_t += interval
+            delay = next_t - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            elif delay < -interval:
+                next_t = time.monotonic()  # fell behind (suspend?); resync
+            out.emit(collector.sample())
+            if args.count and collector.seq >= args.count:
+                break
+            if os.getppid() != parent:
+                break  # ssh died and we were re-parented
+    finally:
+        collector.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
