@@ -46,7 +46,7 @@ extension AppModel {
         .init(name: "ui.screenshot", args: "window=main|settings|menu|<number> [path=/tmp/x.png] [method=auto|screencapture|layer|cache]",
               summary: "PNG of an app window (full pixels need Screen Recording permission; see ui.requestScreenCapture)"),
         .init(name: "ui.requestScreenCapture", args: "", summary: "Ask macOS for Screen Recording permission (one-time prompt)"),
-        .init(name: "ui.render", args: "page=overview|<node id> [width=1100] [appearance=light|dark] [path]",
+        .init(name: "ui.render", args: "page=overview|menu|<node id> [width=1100] [appearance=light|dark] [path]",
               summary: "Offscreen PNG of a full page (not clipped by window size)"),
         .init(name: "log.tail", args: "[n=100] [filter]", summary: "Recent log lines"),
         .init(name: "app.quit", args: "", summary: "Quit the app"),
@@ -428,13 +428,15 @@ extension AppModel {
         let content: AnyView
         if page == "overview" {
             content = AnyView(OverviewGrid())
+        } else if page == "menu" {
+            content = AnyView(MenuBarPanel())
         } else {
             guard let live = live(page) else { throw ControlError("unknown node \(page)") }
             content = AnyView(NodeDetailContent(live: live))
         }
         let view = content
             .environmentObject(self)
-            .frame(width: width)
+            .frame(width: page == "menu" ? MenuBarPanel.width : width)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, dark ? .dark : .light)
         let renderer = ImageRenderer(content: view)

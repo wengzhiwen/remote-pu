@@ -9,14 +9,15 @@ struct Meter: View {
     let fraction: Double?
     var severity: Severity = .normal
     var height: CGFloat = 6
+    var tint: Color?
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(Palette.track.opacity(0.6))
+                Capsule().fill(tint?.opacity(0.16) ?? Palette.track.opacity(0.6))
                 if let f = fraction {
                     Capsule()
-                        .fill(severity.color ?? Palette.accent)
+                        .fill(severity.color ?? tint ?? Palette.accent)
                         .frame(width: max(height, geo.size.width * min(1, max(0, f))))
                 }
             }

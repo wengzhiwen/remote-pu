@@ -38,6 +38,7 @@ struct MenuBarTitleContent: View {
 
 /// The popover panel (see MenuPanelController): one row per node.
 struct MenuBarPanel: View {
+    static let width: CGFloat = 400
     @EnvironmentObject var model: AppModel
 
     var body: some View {
@@ -47,23 +48,22 @@ struct MenuBarPanel: View {
                 Spacer()
                 if model.summary.online > 0 {
                     PulseDot(color: Palette.good, size: 7)
-                    Text("Monitoring").font(.caption).foregroundStyle(.secondary)
                 }
                 Text("\(model.summary.online)/\(model.summary.total) online")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 16)
             .padding(.vertical, 10)
             Divider()
             if model.nodes.isEmpty {
                 Text("No nodes configured").foregroundStyle(.secondary).padding(14)
-            } else if model.nodes.count <= 6 {
+            } else if model.nodes.count <= 4 {
                 // A ScrollView has no ideal height in a self-sizing panel and would
                 // collapse to zero, so small lists are laid out directly.
                 nodeRows
             } else {
                 ScrollView { nodeRows }
-                    .frame(height: 460)
+                    .frame(height: 500)
             }
             Divider()
             HStack(spacing: 12) {
@@ -80,26 +80,31 @@ struct MenuBarPanel: View {
                     Image(systemName: "gearshape")
                 }
                 .help("Settings…")
+                .accessibilityLabel("Settings…")
                 Button {
                     NSApp.terminate(nil)
                 } label: {
                     Image(systemName: "power")
                 }
                 .help("Quit RemotePU")
+                .accessibilityLabel("Quit RemotePU")
             }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 14)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 360)
+        .frame(width: Self.width)
     }
 
     private var nodeRows: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 0) {
             ForEach(model.nodes) { node in
                 MenuNodeRow(live: node) {
                     model.openMainWindow(select: .node(node.id))
                     model.menuPanel?.setOpen(false)
+                }
+                if node.id != model.nodes.last?.id {
+                    Divider().padding(.horizontal, 10)
                 }
             }
         }
@@ -114,49 +119,95 @@ struct MenuNodeRow: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     NodeIconView(symbol: NodeIcons.symbol(for: live.config, hello: live.hello), size: 13)
                     Text(live.config.name).font(.callout.weight(.medium)).lineLimit(1)
-                    StatusBadge(status: live.status, showLabel: false).font(.caption)
                     Spacer()
-                    if let s = live.latest, live.status.phase == .online || live.status.phase == .stale {
-                        Text("CPU \(Fmt.pct(s.cpu?.util))").font(.caption).monospacedDigit()
-                            .contentTransition(.numericText())
-                            .animation(.snappy, value: s.cpu?.util)
-                        TemperatureText(value: s.cpu?.tempC).font(.caption)
-                    } else {
-                        Text(live.status.phase.label).font(.caption).foregroundStyle(.secondary)
-                    }
+                    StatusBadge(status: live.status).font(.caption2).lineLimit(1)
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
                 }
                 if let s = live.latest, live.status.phase == .online || live.status.phase == .stale {
-                    ForEach(s.gpus ?? [], id: \.idx) { g in
-                        HStack(spacing: 6) {
-                            Text(verbatim: "GPU\(g.idx)").font(.caption2).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
-                            Meter(fraction: g.util.map { $0 / 100 }, height: 5)
-                            Text(Fmt.pct(g.util)).font(.caption2).monospacedDigit().frame(width: 34, alignment: .trailing)
-                                .contentTransition(.numericText())
-                                .animation(.snappy, value: g.util)
-                            TemperatureText(value: g.tempC).font(.caption2).frame(width: 46, alignment: .trailing)
+                    VStack(spacing: 6) {
+                        MenuResourceRow(label: String(localized: "CPU"), fraction: s.cpu?.util.map { $0 / 100 },
+                                        temperature: s.cpu?.tempC)
+                        let memFraction = fraction(s.mem?.used, s.mem?.total)
+                        MenuResourceRow(label: String(localized: "Memory"), fraction: memFraction,
+                                        severity: Severity.fill(memFraction),
+                                        capacity: Fmt.gibPair(s.mem?.used, s.mem?.total))
+                        ForEach(s.gpus ?? [], id: \.idx) { g in
+                            VStack(spacing: 4) {
+                                MenuResourceRow(label: "GPU\(g.idx)", fraction: g.util.map { $0 / 100 },
+                                                tint: Palette.series(g.idx), temperature: g.tempC)
+                                if live.gpuInfo(g.idx)?.unified != true, let total = g.memTotal, total > 0 {
+                                    let memFraction = fraction(g.memUsed, total)
+                                    MenuResourceRow(label: String(localized: "VRAM"), fraction: memFraction,
+                                                    severity: Severity.fill(memFraction),
+                                                    tint: Palette.series(g.idx),
+                                                    capacity: Fmt.gibPair(g.memUsed, total), indented: true)
+                                }
+                            }
                         }
-                    }
-                    HStack(spacing: 6) {
-                        Text("MEM").font(.caption2).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
-                        let f = fraction(s.mem?.used, s.mem?.total)
-                        Meter(fraction: f, severity: Severity.fill(f), height: 5)
-                        Text(Fmt.pct(f.map { $0 * 100 })).font(.caption2).monospacedDigit().frame(width: 34, alignment: .trailing)
-                        Sparkline(values: live.series(.node(.cpuUtil), since: Date().addingTimeInterval(-180)).map(\.avg))
-                            .frame(width: 46, height: 12)
                     }
                 } else if let msg = live.status.message {
                     Text(msg).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            .padding(8)
+            .padding(10)
             .background(RoundedRectangle(cornerRadius: 6).fill(hovering ? Color.primary.opacity(0.06) : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .help("Open Dashboard")
+    }
+}
+
+/// Current readings only: bars and percentages share one column; units explain
+/// the trailing temperature or capacity. Trends belong in the dashboard.
+private struct MenuResourceRow: View {
+    let label: String
+    let fraction: Double?
+    var severity: Severity = .normal
+    var tint: Color?
+    var temperature: Double?
+    var capacity: String?
+    var indented = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                if let tint, !indented {
+                    RoundedRectangle(cornerRadius: 1.5).fill(tint).frame(width: 6, height: 6)
+                }
+                Text(label).foregroundStyle(.secondary)
+            }
+            .padding(.leading, indented ? 10 : 0)
+            .frame(width: 46, alignment: .leading)
+            Meter(fraction: fraction, severity: severity, height: 4, tint: tint)
+                .accessibilityHidden(true)
+            HStack(spacing: 3) {
+                if let symbol = severity.symbol {
+                    Image(systemName: symbol).foregroundStyle(severity.color ?? .secondary)
+                        .font(.system(size: 9))
+                }
+                Text(Fmt.pct(fraction.map { $0 * 100 })).monospacedDigit()
+            }
+            .frame(width: 46, alignment: .trailing)
+            HStack(spacing: 3) {
+                if let capacity {
+                    Text(capacity).monospacedDigit()
+                } else if let temperature {
+                    Image(systemName: "thermometer.medium").foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                    TemperatureText(value: temperature)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .frame(width: 92, alignment: .trailing)
+        }
+        .font(.caption2)
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
     }
 }

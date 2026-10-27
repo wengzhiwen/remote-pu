@@ -91,7 +91,14 @@ struct NodeCard: View {
                         .accessibilityLabel("CPU utilisation, last 5 minutes")
                 }
                 ForEach(s.gpus ?? [], id: \.idx) { g in
-                    GPURowCompact(info: live.gpuInfo(g.idx), sample: g, unified: live.gpuInfo(g.idx)?.unified == true)
+                    HStack(alignment: .top, spacing: 16) {
+                        GPURowCompact(info: live.gpuInfo(g.idx), sample: g, unified: live.gpuInfo(g.idx)?.unified == true)
+                        Sparkline(values: live.series(.gpu(key: live.gpuKeys[g.idx] ?? "idx\(g.idx)", .util),
+                                                      since: Date().addingTimeInterval(-300)).map(\.avg),
+                                  color: Palette.series(g.idx))
+                            .frame(width: 70, height: 34)
+                            .accessibilityLabel("GPU \(g.idx) utilisation, last 5 minutes")
+                    }
                 }
             } else if live.status.phase.isConnecting {
                 ProgressView().controlSize(.small)

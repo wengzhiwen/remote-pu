@@ -72,7 +72,7 @@ open -n dist/RemotePU.app --args --data-dir /tmp/rpu-test --no-keychain [--demo]
 | `ui.windows` | | 所有窗口（类名、identifier、frame、可见性） |
 | `ui.screenshot` | `window=main\|settings\|menu\|<编号> [path] [method=auto\|screencapture\|layer\|cache]` | 截取 App 自己的窗口，见下文 |
 | `ui.requestScreenCapture` | | 请求“屏幕录制”权限（系统弹窗一次） |
-| `ui.render` | `page=overview\|<node id> [width=1100] [appearance=light\|dark] [path]` | 用 ImageRenderer 离屏渲染整页（不受窗口大小/滚动限制） |
+| `ui.render` | `page=overview\|menu\|<node id> [width=1100] [appearance=light\|dark] [path]` | 用 ImageRenderer 离屏渲染整页；menu 按面板固定宽度渲染 |
 | `log.tail` | `[n=100] [filter]` | 最近日志（如 `filter=node:mac-b`） |
 | `app.quit` | | 退出 App（会停止 ssh 并把历史落盘） |
 

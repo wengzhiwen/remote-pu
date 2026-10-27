@@ -60,6 +60,7 @@
 "CPU %lld: %@" = "CPU %lld：%@";
 "CPU temperature" = "CPU 温度";
 "CPU utilisation, last 5 minutes" = "CPU 占用（最近 5 分钟）";
+"GPU %lld utilisation, last 5 minutes" = "GPU %lld 占用（最近 5 分钟）";
 "GPU" = "GPU";
 "GPUs" = "GPU";
 "GPU (max)" = "GPU（最高）";
