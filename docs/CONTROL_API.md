@@ -66,6 +66,7 @@ open -n dist/RemotePU.app --args --data-dir /tmp/rpu-test --no-keychain [--demo]
 | `ui.select` | `node=<id>\|overview` | 选中侧栏项（会打开主窗口） |
 | `ui.range` | `value=15m\|1h\|6h\|24h\|7d\|30d` | 切换图表时间范围 |
 | `ui.menu` | `[open=true\|false]` | 打开/关闭菜单栏面板 |
+| `ui.menubar` | `[path] [appearance=light\|dark]` | 渲染菜单栏标题并返回各节点数值及状态项诊断；`requestedVisible` 和 `anchorOnMenuBar` 不代表系统实际显示，需结合真实菜单栏及 ControlCenter 日志核验 |
 | `ui.editor` | `id=<node>\|new\|none` | 打开/关闭设置里的节点编辑表单 |
 | `ui.appearance` | `value=light\|dark\|system` | 强制外观 |
 | `ui.windows` | | 所有窗口（类名、identifier、frame、可见性） |

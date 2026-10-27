@@ -238,7 +238,7 @@ struct NodeEditor: View {
                     Picker("Value", selection: $config.menuMetric) {
                         Text("Automatic (GPU for GPU servers, else CPU)").tag("auto")
                         Text("CPU utilisation").tag("cpu")
-                        Text("GPU utilisation (busiest)").tag("gpu")
+                        Text("GPU utilisation (by GPU index)").tag("gpu")
                         Text("Temperature (hottest)").tag("temp")
                     }
                     .disabled(!config.showInMenuBar)

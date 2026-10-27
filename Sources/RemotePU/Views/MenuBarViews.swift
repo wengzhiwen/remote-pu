@@ -36,38 +36,9 @@ struct MenuBarTitleContent: View {
     }
 }
 
-/// Status-item label: the pre-rendered title image (re-rendered when values change).
-struct MenuBarLabel: View {
-    @EnvironmentObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
-
-    var body: some View {
-        Group {
-            if let image = model.menuBarImage {
-                Image(nsImage: image)
-            } else {
-                Image(systemName: "gauge.with.dots.needle.67percent")
-            }
-        }
-        .accessibilityLabel(accessibilityText)
-        .onAppear {
-            model.registerOpenWindow { openWindow(id: $0) }
-            model.openSettingsAction = { openSettings() }
-        }
-    }
-
-    private var accessibilityText: String {
-        let parts = model.menuBarEntries().map { e in "\(model.live(e.id)?.config.name ?? e.id) \(e.text)" }
-        return parts.isEmpty ? "RemotePU" : parts.joined(separator: ", ")
-    }
-}
-
-/// Window-style MenuBarExtra content: one row per node.
+/// The popover panel (see MenuPanelController): one row per node.
 struct MenuBarPanel: View {
     @EnvironmentObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,11 +67,15 @@ struct MenuBarPanel: View {
             }
             Divider()
             HStack(spacing: 12) {
-                Button("Open Dashboard") { model.openMainWindow() }
+                Button("Open Dashboard") {
+                    model.openMainWindow()
+                    model.menuPanel?.setOpen(false)
+                }
                     .keyboardShortcut("d")
                 Spacer()
                 Button {
                     model.openSettings()
+                    model.menuPanel?.setOpen(false)
                 } label: {
                     Image(systemName: "gearshape")
                 }
@@ -117,10 +92,6 @@ struct MenuBarPanel: View {
             .padding(.vertical, 10)
         }
         .frame(width: 360)
-        .onAppear {
-            model.openWindowAction = { openWindow(id: $0) }
-            model.openSettingsAction = { openSettings() }
-        }
     }
 
     private var nodeRows: some View {
@@ -128,6 +99,7 @@ struct MenuBarPanel: View {
             ForEach(model.nodes) { node in
                 MenuNodeRow(live: node) {
                     model.openMainWindow(select: .node(node.id))
+                    model.menuPanel?.setOpen(false)
                 }
             }
         }

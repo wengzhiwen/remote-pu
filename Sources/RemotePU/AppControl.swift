@@ -197,8 +197,21 @@ extension AppModel {
                 throw ControlError("render failed")
             }
             try png.write(to: URL(fileURLWithPath: path))
+            let item = menuPanel?.statusItem
+            let frame = item?.button?.window?.frame
+            // This is the last known anchor, not proof of host visibility:
+            // ControlCenter can block an item while AppKit still reports true.
+            let anchorOnMenuBar = frame.map { frame in
+                NSScreen.screens.contains { screen in
+                    let bar = NSRect(x: screen.frame.minX, y: screen.visibleFrame.maxY,
+                                     width: screen.frame.width, height: screen.frame.maxY - screen.visibleFrame.maxY)
+                    return frame.intersects(bar)
+                }
+            } ?? false
             return ["path": .string(path), "entries": .array(entries.map { ["node": .string($0.id), "symbol": .string($0.symbol),
-                                                                              "text": .string($0.text), "online": .bool($0.online)] })]
+                                                                              "text": .string($0.text), "online": .bool($0.online)] }),
+                    "statusItem": ["autosaveName": .from(item?.autosaveName), "requestedVisible": .bool(item?.isVisible ?? false),
+                                   "anchorOnMenuBar": .bool(anchorOnMenuBar)]]
         case "ui.appearance":
             setAppearance(req.string("value") ?? "system")
             return .string(req.string("value") ?? "system")
@@ -367,8 +380,7 @@ extension AppModel {
             found = windows.first { ($0.identifier?.rawValue.contains("Settings") ?? false) && $0.isVisible }
                 ?? windows.first { $0.isVisible && String(describing: type(of: $0)).contains("Settings") }
         case "menu":
-            found = windows.first { $0.isVisible && String(describing: type(of: $0)).contains("MenuBarExtra") }
-                ?? windows.first { $0.isVisible && $0 is NSPanel && $0.level.rawValue > NSWindow.Level.normal.rawValue }
+            found = menuPanel?.panelWindow
         default:
             found = Int(name).flatMap { n in windows.first { $0.windowNumber == n } }
         }
@@ -434,23 +446,9 @@ extension AppModel {
         return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
     }
 
-    /// Clicks our NSStatusItem button (MenuBarExtra has no programmatic open API).
+    /// Opens/closes the popover panel (see MenuPanelController).
     func toggleMenuBarPanel(open: Bool?) throws {
-        let panelVisible = (try? window("menu")) != nil
-        if let open, open == panelVisible { return }
-        for w in NSApp.windows where String(describing: type(of: w)).contains("NSStatusBarWindow") {
-            if let button = findStatusButton(in: w.contentView) {
-                button.performClick(nil)
-                return
-            }
-        }
-        throw ControlError("status item not found")
-    }
-
-    private func findStatusButton(in view: NSView?) -> NSStatusBarButton? {
-        guard let view else { return nil }
-        if let b = view as? NSStatusBarButton { return b }
-        for sub in view.subviews { if let b = findStatusButton(in: sub) { return b } }
-        return nil
+        guard let panel = menuPanel else { throw ControlError("menu bar not set up") }
+        panel.setOpen(open ?? !panel.isShown)
     }
 }

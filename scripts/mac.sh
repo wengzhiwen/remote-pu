@@ -4,6 +4,7 @@
 #
 #   scripts/mac.sh build              release build of all products
 #   scripts/mac.sh bundle             build + dist/RemotePU.app (ad-hoc signed)
+#   scripts/mac.sh recovery           bundle with a separate menu-bar app identity
 #   scripts/mac.sh install            bundle + copy to ~/Applications/RemotePU.app
 #   scripts/mac.sh run [-- args]      bundle + launch dist/RemotePU.app with args
 #                                     e.g. scripts/mac.sh run -- --data-dir /tmp/rpu-test --demo
@@ -61,6 +62,16 @@ case $cmd in
   build) build ;;
   agent) build; agent; ls -l dist/rpu-agent-mac* ;;
   bundle) bundle ;;
+  recovery)
+    # Keep the normal bundle intact when ControlCenter has a corrupt record for
+    # its identifier. Node settings, history and SSH keychain service are shared.
+    APP=dist/RemotePU-Recovery.app
+    bundle
+    /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.remotepu.RemotePU.Recovery' "$APP/Contents/Info.plist"
+    codesign -f -s - "$APP" 2>/dev/null
+    codesign --verify --strict "$APP"
+    echo "recovery bundle ready: $APP"
+    ;;
   install)
     bundle
     mkdir -p "$HOME/Applications"

@@ -4,8 +4,6 @@ import SwiftUI
 
 struct MainWindow: View {
     @EnvironmentObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         NavigationSplitView {
@@ -73,12 +71,6 @@ struct MainWindow: View {
             }
         }
         .frame(minWidth: 820, minHeight: 560)
-        .onAppear {
-            model.openWindowAction = { openWindow(id: $0) }
-            model.openSettingsAction = { openSettings() }
-            model.mainWindowDidChange(visible: true)
-        }
-        .onDisappear { model.mainWindowDidChange(visible: false) }
     }
 }
 

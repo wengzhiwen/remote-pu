@@ -1,8 +1,10 @@
 # RemotePU — macOS 本地/远程 CPU·GPU 监控工具 计划 v3
 
-> 最后更新：2026-10-25
+> 最后更新：2026-10-27
 > - v2：加入远程 Mac；改为自研 Mac 采集器；不依赖 Xcode 和 Homebrew。
 > - v3：v1 功能已全部编码完成并经过真机冒烟测试；新增密码登录、控制接口（供自动化测试）、GB10 统一内存主机、节点图标、实时反馈效果。
+> - v3.1：菜单栏改为纯 AppKit（NSStatusItem + NSPopover，主/设置窗口为 NSWindow+NSHostingController）——macOS 26 上 MenuBarExtra(.window) 的展开动画会随场景更新不断重放，面板不可用。
+> - v3.2：菜单栏按 GPU 编号并列显示多卡占用，状态项保存标识按数据目录区分；增加独立应用标识的恢复包，用于绕开损坏的 ControlCenter 关联记录。
 > - 测试清单见 [TESTING.md](TESTING.md)，控制接口见 [docs/CONTROL_API.md](docs/CONTROL_API.md)。
 
 ## 1. 已对齐的决策
@@ -37,7 +39,7 @@
 
 ```
 ┌─────────────────────── RemotePU.app (本机 Mac) ─────────────────────────┐
-│ SwiftUI: MenuBarExtra(模板图标题) + 主窗口 + 设置    ← rpuctl / 控制接口 │
+│ AppKit 菜单栏/窗口 + SwiftUI 内容（NSStatusItem+NSPopover、主窗口、设置）← rpuctl / 控制接口 │
 │        ▲ AppModel (ObservableObject) / NodeLive（每节点，1s 环形缓冲 30 min）│
 │ NodeManager → NodeRunner（actor，每节点一个；状态机 + 退避重连）          │
 │   ├ 本机 Mac : Contents/Helpers/rpu-agent-mac                           │

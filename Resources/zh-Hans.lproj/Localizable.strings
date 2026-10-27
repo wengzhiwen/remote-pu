@@ -180,7 +180,7 @@
 "Value" = "数值";
 "Automatic (GPU for GPU servers, else CPU)" = "自动（GPU 服务器显示 GPU，其余显示 CPU）";
 "CPU utilisation" = "CPU 占用";
-"GPU utilisation (busiest)" = "GPU 占用（最高）";
+"GPU utilisation (by GPU index)" = "GPU 占用（按编号顺序）";
 "Temperature (hottest)" = "温度（最高）";
 "Each node: icon + value" = "每台机器：图标 + 数值";
 "Busiest GPU (with its node icon)" = "最忙的 GPU（带机器图标）";

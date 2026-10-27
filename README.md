@@ -15,11 +15,14 @@ See [PLAN.md](PLAN.md) for design decisions and [TESTING.md](TESTING.md) for wha
 ```sh
 scripts/mac.sh test      # Swift tests (uses Xcode toolchain if present) + Python collector tests
 scripts/mac.sh bundle    # → dist/RemotePU.app (ad-hoc signed)
+scripts/mac.sh recovery  # → dist/RemotePU-Recovery.app (separate application identity)
 scripts/mac.sh install   # → ~/Applications/RemotePU.app
 scripts/mac.sh run -- --data-dir /tmp/rpu-test --demo   # isolated instance with demo nodes
 ```
 
 From a non-Mac dev box: `scripts/remote-mac.sh scripts/mac.sh bundle` syncs the tree to `$RPU_MAC_HOST` (e.g. `user@my-mac`; can be set in the gitignored `local/env.sh`) and runs the command there.
+
+If macOS ControlCenter incorrectly blocks the normal app's menu-bar item, the recovery bundle uses `local.remotepu.RemotePU.Recovery` to avoid the damaged system record. It shares the normal node configuration, history and SSH keychain service. Quit the normal app before opening the recovery bundle; they must not run against the same data directory at the same time. This restores the menu-bar entry without repairing macOS's record for the original identifier.
 
 ## Command-line tools (inside the app bundle, `Contents/Helpers/`)
 

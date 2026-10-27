@@ -133,7 +133,7 @@ struct MenuBarEntry: Equatable, Identifiable {
 }
 
 @MainActor
-final class AppModel: ObservableObject {
+final class AppModel: NSObject, ObservableObject {
     static let shared = AppModel()
 
     let options: LaunchOptions
@@ -161,9 +161,12 @@ final class AppModel: ObservableObject {
     @Published var editor: NodeEditorTarget?
     @Published var mainWindowVisible = false
 
-    /// Captured from SwiftUI views (openWindow / openSettings are environment actions).
-    var openWindowAction: ((String) -> Void)?
-    var openSettingsAction: (() -> Void)?
+    /// The AppKit menu bar (status item + popover panel) and the AppKit main window.
+    /// SwiftUI's MenuBarExtra(.window) replays its expand animation on every scene
+    /// update — once per sample — on macOS 26, so both live outside the scene graph.
+    private(set) var menuPanel: MenuPanelController?
+    private var mainWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var pendingOpenMain = false
 
     private var configs: [NodeConfig]
@@ -171,7 +174,7 @@ final class AppModel: ObservableObject {
     private var liveByID: [String: NodeLive] = [:]
     let startedAt = Date()
 
-    private init() {
+    private override init() {
         ignoreSIGPIPE()
         let options = LaunchOptions.parse()
         let paths = RPUPaths.standard(dataDirOverride: options.dataDir)
@@ -201,6 +204,7 @@ final class AppModel: ObservableObject {
                                                      broker: broker, secrets: secrets))
         RPULog.shared.log("app", "start; data=\(paths.dataDir.path) agent=\(agent ?? "-") askpass=\(askpass ?? "-")")
 
+        super.init()
         rebuildLive()
         startEventLoop()
         if options.controlEnabled { startControlServer() }
@@ -279,18 +283,19 @@ final class AppModel: ObservableObject {
 
     func symbol(for live: NodeLive) -> String { NodeIcons.symbol(for: live.config, hello: live.hello) }
 
-    /// Headline value of a node for the menu bar ("auto": GPU for Linux GPU boxes, else CPU).
+    /// Headline value of a node for the menu bar (GPUs in index order; "auto": GPU for Linux GPU boxes, else CPU).
     func menuValue(for live: NodeLive) -> String {
         guard live.status.phase == .online || live.status.phase == .stale, let l = live.latest else { return Fmt.dash }
-        let gpu = l.gpus?.compactMap(\.util).max()
+        let gpus = (l.gpus ?? []).sorted { $0.idx < $1.idx }
+        let gpuText = gpus.isEmpty ? Fmt.dash : gpus.map { Fmt.pct($0.util) }.joined(separator: " ")
         let temp = ((l.gpus?.compactMap(\.tempC) ?? []) + [l.cpu?.tempC].compactMap { $0 }).max()
         switch live.config.menuMetric {
         case "cpu": return Fmt.pct(l.cpu?.util)
-        case "gpu": return Fmt.pct(gpu)
+        case "gpu": return gpuText
         case "temp": return temp.map { String(format: "%.0f°", $0) } ?? Fmt.dash
         default:
-            let gpuBox = live.hello?.os == "linux" && !(l.gpus ?? []).isEmpty
-            return Fmt.pct(gpuBox ? gpu : l.cpu?.util)
+            let gpuBox = live.hello?.os == "linux" && !gpus.isEmpty
+            return gpuBox ? gpuText : Fmt.pct(l.cpu?.util)
         }
     }
 
@@ -327,6 +332,15 @@ final class AppModel: ObservableObject {
         let image = NSImage(cgImage: cg, size: size)
         image.isTemplate = true // adapts to light/dark menu bars
         menuBarImage = image
+        if let button = menuPanel?.statusButton {
+            button.image = image
+            button.setAccessibilityLabel(accessibilityText(for: entries))
+        }
+    }
+
+    private func accessibilityText(for entries: [MenuBarEntry]) -> String {
+        let parts = entries.map { e in "\(live(e.id)?.config.name ?? e.id) \(e.text)" }
+        return parts.isEmpty ? "RemotePU" : parts.joined(separator: ", ")
     }
 
     private func runMaintenance() {
@@ -339,6 +353,7 @@ final class AppModel: ObservableObject {
     func prepareForQuit() {
         maintenanceTimer?.invalidate()
         control?.stop()
+        menuPanel?.setOpen(false)
     }
 
     // MARK: - nodes
@@ -469,25 +484,64 @@ final class AppModel: ObservableObject {
 
     // MARK: - windows
 
-    func registerOpenWindow(_ action: @escaping (String) -> Void) {
-        openWindowAction = action
+    /// Creates the status item and the popover panel (called from AppDelegate once
+    /// the app has finished launching).
+    func startMenuBar() {
+        guard menuPanel == nil else { return }
+        let panel = MenuPanelController(model: self)
+        menuPanel = panel
+        if let button = panel.statusButton {
+            button.image = menuBarImage
+            button.setAccessibilityLabel(accessibilityText(for: lastMenuEntries))
+        }
         if pendingOpenMain {
             pendingOpenMain = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.openMainWindow() }
+            openMainWindow()
         }
     }
 
     func openMainWindow(select: SidebarItem? = nil) {
         if let select { selection = select }
+        let w = mainWindow ?? makeMainWindow()
         NSApp.setActivationPolicy(.regular)
-        openWindowAction?("main")
+        w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func makeMainWindow() -> NSWindow {
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                         backing: .buffered, defer: false)
+        w.title = "RemotePU"
+        w.identifier = NSUserInterfaceItemIdentifier("main")
+        w.contentViewController = NSHostingController(rootView: MainWindow().environmentObject(self))
+        w.setContentSize(NSSize(width: 1180, height: 820))
+        w.contentMinSize = NSSize(width: 820, height: 560)
+        w.isReleasedWhenClosed = false // we keep the window and re-show it
+        w.delegate = self
+        w.center()
+        mainWindow = w
+        return w
     }
 
     func openSettings(tab: String? = nil) {
         if let tab { settingsTab = tab }
         NSApp.activate(ignoringOtherApps: true)
-        openSettingsAction?()
+        let w = settingsWindow ?? makeSettingsWindow()
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    private func makeSettingsWindow() -> NSWindow {
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
+                         styleMask: [.titled, .closable, .miniaturizable],
+                         backing: .buffered, defer: false)
+        w.identifier = NSUserInterfaceItemIdentifier("Settings")
+        w.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(self))
+        w.setContentSize(NSSize(width: 620, height: 460))
+        w.isReleasedWhenClosed = false
+        w.center()
+        settingsWindow = w
+        return w
     }
 
     func mainWindowDidChange(visible: Bool) {
@@ -516,5 +570,17 @@ final class AppModel: ObservableObject {
         } catch {
             RPULog.shared.log("control", "cannot start control server: \(error)")
         }
+    }
+}
+
+extension AppModel: NSWindowDelegate {
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w === mainWindow else { return }
+        mainWindowDidChange(visible: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w === mainWindow else { return }
+        mainWindowDidChange(visible: false)
     }
 }

@@ -8,33 +8,27 @@ struct RemotePUApp: App {
     @StateObject private var model = AppModel.shared
 
     var body: some Scene {
-        // The menu bar item comes first so launching does not force a window open;
-        // the dashboard is opened explicitly (see AppModel.registerOpenWindow).
-        MenuBarExtra {
-            MenuBarPanel().environmentObject(model)
-        } label: {
-            MenuBarLabel().environmentObject(model)
+        // The menu bar item and the main window are AppKit objects created in
+        // AppModel.startMenuBar()/openMainWindow(): SwiftUI's MenuBarExtra(.window)
+        // replays its expand animation on every scene update on macOS 26, which made
+        // the panel permanently re-animate (see MenuPanelController).
+        Settings {
+            SettingsView().environmentObject(model)
         }
-        .menuBarExtraStyle(.window)
-
-        Window("RemotePU", id: "main") {
-            MainWindow().environmentObject(model)
-        }
-        .defaultSize(width: 1180, height: 820)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Reconnect All Nodes") { model.reconnect(nil) }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
         }
-
-        Settings {
-            SettingsView().environmentObject(model)
-        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppModel.shared.startMenuBar()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
