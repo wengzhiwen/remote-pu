@@ -176,6 +176,8 @@ struct NodeEditor: View {
     @State private var savePassword = true
     @State private var portText = ""
     @State private var optionsText = ""
+    @State private var aetherEnabled = false
+    @State private var aetherDir = ""
     @State private var error: String?
 
     init(target: NodeEditorTarget) {
@@ -183,6 +185,8 @@ struct NodeEditor: View {
         _config = State(initialValue: target.config)
         _portText = State(initialValue: target.config.port.map(String.init) ?? "")
         _optionsText = State(initialValue: target.config.sshOptions.joined(separator: ", "))
+        _aetherEnabled = State(initialValue: target.config.aetherSwitch != nil)
+        _aetherDir = State(initialValue: target.config.aetherSwitch?.dir ?? "~/server_mgr")
     }
 
     private var isLocal: Bool { config.kind == .local }
@@ -225,6 +229,14 @@ struct NodeEditor: View {
                     }
                     Section("Advanced") {
                         TextField("Extra ssh options", text: $optionsText, prompt: Text("e.g. ProxyJump=bastion, Compression=yes"))
+                    }
+                    Section("AetherSwitch") {
+                        Toggle("Enable AetherSwitch", isOn: $aetherEnabled)
+                        if aetherEnabled {
+                            TextField("mgr directory", text: $aetherDir, prompt: Text("~/server_mgr"))
+                            Text("Directory of the mgr script (AetherSwitch) on this node; switch GPU modes from the node's dashboard page.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Section("Sampling") {
@@ -270,7 +282,7 @@ struct NodeEditor: View {
             }
             .padding(16)
         }
-        .frame(width: 540, height: isLocal ? 520 : 760)
+        .frame(width: 540, height: isLocal ? 520 : 880)
     }
 
     private func save() {
@@ -278,6 +290,8 @@ struct NodeEditor: View {
         config.target = config.target.trimmingCharacters(in: .whitespaces)
         config.port = Int(portText.trimmingCharacters(in: .whitespaces))
         config.sshOptions = optionsText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let dir = aetherDir.trimmingCharacters(in: .whitespaces)
+        config.aetherSwitch = aetherEnabled ? AetherSwitchConfig(dir: dir.isEmpty ? "~/server_mgr" : dir) : nil
         if config.auth == .password, password.isEmpty, !model.secrets.hasPassword(for: config.id.isEmpty ? "-" : config.id) {
             error = String(localized: "Enter the ssh password.")
             return

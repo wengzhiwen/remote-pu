@@ -24,6 +24,7 @@ If a `CLAUDE.local.md` exists (gitignored), it holds the private test-host detai
 - `Sources/RemotePUCore`:
   - `NodeRunner`: per-node state machine — ssh master → probe → deploy → stream → backoff.
   - `SSH.swift`: argument builders and remote scripts.
+  - `AetherSwitch.swift`: optional per-node GPU mode switcher (runs the deployed `mgr` script from the aether-switch project over the node's ssh master; configured by node, controlled from the node detail page).
   - `AskpassBroker`: password logins.
   - `HistoryStore`: SQLite.
   - `ManagedProcess`: line-streamed child processes.
@@ -39,7 +40,7 @@ If a `CLAUDE.local.md` exists (gitignored), it holds the private test-host detai
 - Never return `.terminateLater` and finish on the main actor: AppKit's nested loop doesn't drain the main queue. Quit runs the cleanup on the cooperative pool with a bounded wait (see `AppDelegate`).
 - ssh masters run `cat` remotely, on a stdin pipe the app holds open (`holdStdinOpen`), so they die with the app; plain `-N` masters were left running after the app quit.
 - Agent uploads must be verified by SHA-256 on the remote before install: a dropped connection makes `cat > file` succeed with a truncated file.
-- `LazyVGrid`/`LazyVStack` render nothing in `ImageRenderer`; use `ColumnsLayout`/`Grid`. A `ScrollView` inside the self-sizing popover panel collapses to zero height.
+- `LazyVGrid`/`LazyVStack` render nothing in `ImageRenderer`; use `ColumnsLayout`/`Grid`. A `ScrollView` inside the self-sizing popover panel collapses to zero height. `ImageRenderer` also never runs `.task` — views that load data in a task need a synchronous fallback behind the `renderPreviewMode` environment flag (see `MetricChart`).
 - The menu bar is plain AppKit (`MenuPanelController`: `NSStatusItem` with a pre-rendered template `NSImage` title + `NSPopover`); SwiftUI's `MenuBarExtra(.window)` replays its expand animation on every scene update (macOS 26), which made the panel constantly re-animate and unclickable. The main and settings windows are AppKit windows hosting SwiftUI (`NSHostingController` syncs toolbars and window titles).
 - Swift charts: one measure per chart (no dual axes); colours follow the entity (GPU index → categorical slot), never its rank. Status colours always come with an icon and a label.
 - In zsh, `$CMD args` does not word-split; define a shell function instead.

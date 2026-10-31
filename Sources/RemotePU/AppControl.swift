@@ -19,13 +19,15 @@ extension AppModel {
         .init(name: "ping", args: "", summary: "App version, pid, paths"),
         .init(name: "state", args: "", summary: "All nodes: config, status, latest summary; UI state"),
         .init(name: "nodes.list", args: "", summary: "Node configs (including demo nodes)"),
-        .init(name: "nodes.add", args: "name target [kind=ssh|local] [auth=system|password] [password] [persist=true] [port] [identityFile] [interval] [enabled] [sshOptions:=[..]] [icon=<SF Symbol>|auto] [showInMenuBar] [menuMetric=auto|cpu|gpu|temp] [id]",
+        .init(name: "nodes.add", args: "name target [kind=ssh|local] [auth=system|password] [password] [persist=true] [port] [identityFile] [interval] [enabled] [sshOptions:=[..]] [icon=<SF Symbol>|auto] [showInMenuBar] [menuMetric=auto|cpu|gpu|temp] [aetherDir=<dir|off>] [id]",
               summary: "Add a node"),
         .init(name: "nodes.update", args: "id [same fields as nodes.add]", summary: "Change a node"),
         .init(name: "nodes.remove", args: "id", summary: "Delete a node (and its keychain password)"),
         .init(name: "nodes.setPassword", args: "id password [persist=true]", summary: "Set ssh password (persist=false: memory only)"),
         .init(name: "nodes.reconnect", args: "[id]", summary: "Reconnect one node (or all) now"),
         .init(name: "nodes.sample", args: "id", summary: "Latest hello + sample as sent by the collector"),
+        .init(name: "nodes.aether", args: "id [action=status|switch|restart|stop] [mode=<id>] [dir=<path>] [timeout=1200]",
+              summary: "AetherSwitch on a node: status (default), or run mgr switch/restart/stop; blocks until done"),
         .init(name: "nodes.wait", args: "id [phase=online] [timeout=60]", summary: "Block until a node reaches a phase"),
         .init(name: "history.query", args: "id metric [range=1h | seconds] [points=200]",
               summary: "Series from storage; metric e.g. cpu_util, gpu:<key>:util"),
@@ -99,6 +101,8 @@ extension AppModel {
             return ["hello": try live.hello.map { try JSONValue(encoding: $0, encoder: RPUJSON.makeEncoder()) } ?? .null,
                     "sample": try live.latest.map { try JSONValue(encoding: $0, encoder: RPUJSON.makeEncoder()) } ?? .null,
                     "status": try JSONValue(encoding: live.status, encoder: Self.unixDateEncoder)]
+        case "nodes.aether":
+            return try await aetherControl(req)
         case "nodes.wait":
             let live = try node(req)
             let wanted = NodePhase(rawValue: req.string("phase") ?? "online") ?? .online
@@ -270,6 +274,64 @@ extension AppModel {
         return n
     }
 
+    /// `nodes.aether`: status by default; switch/restart/stop run `mgr` over the
+    /// node's connection and block until it finishes (switching loads models —
+    /// pass rpuctl --timeout ≥ 1200). `dir` overrides the node's configured
+    /// AetherSwitch directory, so tests can probe before configuring.
+    private func aetherControl(_ req: ControlRequest) async throws -> JSONValue {
+        let live = try node(req)
+        guard live.config.kind == .ssh else { throw ControlError("aether needs an ssh node") }
+        let dir = req.string("dir") ?? live.config.aetherSwitch?.dir ?? "~/server_mgr"
+        var out: [String: JSONValue] = ["dir": .string(dir)]
+        switch req.string("action") ?? "status" {
+        case "status":
+            let res = try await manager.runRemote(nodeID: live.id, script: AetherScripts.statusAndList(dir: dir), timeout: 90)
+            guard res.status == 0 else {
+                throw ControlError(res.errorText.isEmpty ? "mgr exited with status \(res.status)" : res.errorText)
+            }
+            let (modes, status) = try AetherScripts.parse(res.stdout)
+            if let live2 = self.live(live.id) {
+                live2.aether.modes = modes
+                live2.aether.status = status
+                live2.aether.updatedAt = Date()
+            }
+            out["modes"] = try JSONValue(encoding: modes, encoder: RPUJSON.makeEncoder())
+            out["status"] = try JSONValue(encoding: status, encoder: RPUJSON.makeEncoder())
+        case "switch", "restart":
+            guard let mode = req.string("mode") else { throw ControlError("mode required") }
+            let script = req.string("action") == "restart"
+                ? AetherScripts.restartMode(dir: dir, mode: mode)
+                : AetherScripts.switchMode(dir: dir, mode: mode)
+            try await runAetherScript(live.id, script, timeout: req.double("timeout") ?? 1200)
+            out["ok"] = .bool(true)
+        case "stop":
+            try await runAetherScript(live.id, AetherScripts.stop(dir: dir), timeout: req.double("timeout") ?? 300)
+            out["ok"] = .bool(true)
+        default:
+            throw ControlError("action must be status|switch|restart|stop")
+        }
+        // After actions, a best-effort refresh so callers see the resulting state.
+        if out["ok"] != nil,
+           let res = try? await manager.runRemote(nodeID: live.id, script: AetherScripts.statusAndList(dir: dir), timeout: 90),
+           res.status == 0, let (modes, status) = try? AetherScripts.parse(res.stdout) {
+            if let live2 = self.live(live.id) {
+                live2.aether.modes = modes
+                live2.aether.status = status
+                live2.aether.updatedAt = Date()
+            }
+            out["modes"] = try JSONValue(encoding: modes, encoder: RPUJSON.makeEncoder())
+            out["status"] = try JSONValue(encoding: status, encoder: RPUJSON.makeEncoder())
+        }
+        return .object(out)
+    }
+
+    private func runAetherScript(_ id: String, _ script: String, timeout: Double) async throws {
+        let res = try await manager.runRemote(nodeID: id, script: script, timeout: timeout)
+        guard res.status == 0 else {
+            throw ControlError(res.errorText.isEmpty ? "mgr exited with status \(res.status)" : res.errorText)
+        }
+    }
+
     private func nodeConfig(from req: ControlRequest, base: NodeConfig?) throws -> NodeConfig {
         var c = base ?? NodeConfig(id: req.string("id") ?? "", name: req.string("name") ?? req.string("target") ?? "node")
         if let v = req.string("name") { c.name = v }
@@ -293,6 +355,10 @@ extension AppModel {
         if let v = req.string("menuMetric") {
             guard ["auto", "cpu", "gpu", "temp"].contains(v) else { throw ControlError("menuMetric must be auto|cpu|gpu|temp") }
             c.menuMetric = v
+        }
+        if let v = req.string("aetherDir") {
+            let t = v.trimmingCharacters(in: .whitespaces)
+            c.aetherSwitch = (t.isEmpty || t == "off" || t == "none") ? nil : AetherSwitchConfig(dir: t)
         }
         if base == nil, c.kind == .ssh, c.target.isEmpty { throw ControlError("target required") }
         if base == nil, req.string("password") != nil, req.string("auth") == nil { c.auth = .password }

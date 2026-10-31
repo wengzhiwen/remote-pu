@@ -190,3 +190,34 @@
 "Busiest CPU (with its node icon)" = "最忙的 CPU（带机器图标）";
 "Choose each node's icon, value and visibility in Settings → Nodes." = "在“设置 → 节点”中为每台机器选择图标、显示的数值以及是否显示。";
 "Preview" = "预览";
+
+/* AetherSwitch */
+"AetherSwitch" = "AetherSwitch";
+"Enable AetherSwitch" = "启用 AetherSwitch";
+"mgr directory" = "mgr 目录";
+"~/server_mgr" = "~/server_mgr";
+"Directory of the mgr script (AetherSwitch) on this node; switch GPU modes from the node's dashboard page." = "此节点上 mgr 脚本（AetherSwitch）所在目录；可在该节点的仪表页切换 GPU 模式。";
+"Switch" = "切换";
+"Current" = "当前";
+"Stop all" = "全部停止";
+"Stop every managed mode on this node" = "停止此节点上所有受管模式";
+"No modes registered" = "没有已注册的模式";
+"Ready" = "就绪";
+"Busy" = "忙碌";
+"Loading" = "加载中";
+"Not ready" = "未就绪";
+"Stopping" = "停止中";
+"Running" = "运行中";
+"Failed" = "失败";
+"Conflict" = "状态冲突";
+"Stopped" = "已停止";
+"Switching to %@" = "正在切换到 %@";
+"Restarting %@" = "正在重启 %@";
+"Preparing" = "准备中";
+"Checking" = "检查中";
+"Releasing GPU" = "释放 GPU";
+"Loading model" = "加载模型中";
+"Complete" = "已完成";
+"Force stopping" = "强制停止中";
+"Node is not connected" = "节点未连接";
+"Remote commands need an ssh node" = "远程命令需要 ssh 节点";

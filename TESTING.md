@@ -48,6 +48,9 @@ export RPU_MAC_HOST=user@mac-a               # 只有从非 Mac 机器运行 scr
 - 修复仪表盘（尤其节点详情页）滚轮滚动不顺畅：隔离实例（`--demo`，本机 + 两个 demo 节点全部 1 s 间隔）空闲流式时主线程忙时从 ~70% 降到 ~12%（`sample` 前后对比；Overview ~9%，窗口全关 ~2%）。三个原因各有修复：`PulseDot` 的 `repeatForever` 动画改为 CALayer 上的 CABasicAnimation（渲染服务进程执行）；数值文本的 `numericText`+`.snappy` 过渡每秒重启导致渲染循环永不停，已移除；`MetricChart` 不再观察 `NodeLive`/`AppModel`，改由 task 定时拉取（实时 2 s、历史 15 s），实时序列点数上限 450→150。另外关闭的主窗口与菜单面板现在会卸载 SwiftUI 内容，不再隐藏时持续按采样重绘。
 - 回归：Swift 20 项、Python 14 项测试通过；`ui.render` 概览 / 节点详情 / 菜单面板（深色）渲染正常（离屏渲染中状态圆点为实心、无光晕，属预期）；菜单面板开合正常。
 - 仪表盘顶栏重构：时间范围与监测状态移入侧栏顶部的抽屉（状态行常显，范围可折叠、当前项带勾选）。放弃 SwiftUI `.toolbar` 与 `NavigationSplitView`（macOS 26 下同步进手建 NSWindow 的系统工具栏有两个毛病：详情页滚动内容会盖住标题栏，系统侧栏按钮点击后会在标题栏左右大幅迁移），改为窗口内自绘控制栏（侧栏开关 + 页面标题 + 全部重连），侧栏为自绘列（固定宽 + 毛玻璃材质，Option+Cmd+S 开关）；详情页内容宽度上限 950 pt 居中，侧栏开合与宽窗口缩放不再引起图表/KPI 重排换行（只平移）。`ui.range`、`ui.select` 回归正常，Swift 20 项 + Python 14 项测试通过。
+- 15 分钟实时视图跨重启续接：数据一直在 SQLite 里持久化（`history.query` 可查到上次运行），但实时视图只读内存环形缓冲，重启后上半段空白。现在 `MetricChart` 启动时先同步画本次运行的环形数据，再从数据库"接种"上次运行的部分（`historySeed`，截止本次启动时刻），与本轮实时流拼接后统一抽稀到 150 点。用 `/tmp` 数据目录复现验证：两次运行共约 3 分钟数据，重启后 `history.query` 返回全部 71 行；离屏 `ui.render` 因 ImageRenderer 不执行 `.task`，增加 `renderPreviewMode` 环境标志同步读环形数据（修复了图表解耦后离屏节点详情一直空图的问题）。概览卡片上的迷你趋势线仍只读内存（重启后随新数据重新生长）。thinSeries 抽稀逻辑新增单测，Swift 21 项 + Python 14 项通过。
+- 修复接种数据导致的绘图溢出：接种点是静态的，应用运行超过 15 分钟后时间窗滑过它们，落在 x 域之外的点 Swift Charts 不裁剪，数据线从 y 轴左侧溢出（用户截图确认）。每次刷新时按当前窗口过滤（`t >= since`）。不用 `chartPlotStyle` + `clipped`，因为会裁掉绘图区上方的悬停提示框。
+- AetherSwitch 集成（v1）：节点配置新增"启用 AetherSwitch + mgr 目录"（`aetherDir`，默认 `~/server_mgr`），详情页头部下方新增 AetherSwitch 卡片（当前模式 + 各模式状态/切换按钮 + 全部停止，经节点自己的 ssh master 复用连接执行 `mgr`，5 秒轮询 `mgr status --json`，切换期间显示 operation 阶段）。控制接口新增 `nodes.aether`。单测 +6 项（脚本构造/目录含空格与特殊字符转义/解析/配置往返）。真机（部署了 AetherSwitch 的 GPU Linux 主机，密钥登录）：状态与模式列表正确（含中文模式名、服务 URL）；`switch` 到当前模式走 `unchanged` 无副作用分支成功；错误目录返回清晰错误；`aetherDir=off` 关闭再开启正常；`ui.render` 浅色/深色详情页渲染正常。真实跨模式切换见 E 类。
 
 ## 集成测试
 
@@ -108,6 +111,20 @@ curl -sL "$url" | tar xz && ./macmon pipe -s 5 -i 1000 > macmon.jsonl &   # 参�
 | D3 | 在"设置 → 节点 → 编辑"里改图标、"在菜单栏显示"、显示的数值 | 菜单栏、侧栏、卡片、详情页的图标同步变化 |
 | D4 | 运行超过 10 分钟后，详情页切到 1h / 6h | 曲线从 SQLite 读取；`r history.query id=… metric=cpu_util range=1h` 有数据 |
 | D5 | 在图表上悬停 | 出现十字线，提示框里列出所有序列的数值 |
+
+### E. AetherSwitch（GPU 模式切换）
+
+前提：目标主机上部署了 AetherSwitch（`~/server_mgr/mgr`，密钥登录）。用 `r nodes.add name=… target=$RPU_HOST_AETHER aetherDir=~/server_mgr` 添加节点。切换会真实地停止当前 GPU 服务并启动新模式，**测试前确认该机上没有正在进行的任务**。
+
+| # | 步骤 | 期望 |
+|---|---|---|
+| E1 | `r nodes.aether id=<节点>` | 返回 `modes`（含中文名）和 `status`：`current_mode` 指向运行中的模式，其余 `stopped` |
+| E2 | `r --timeout 1200 nodes.aether id=<节点> action=switch mode=<当前模式>` | `ok=true`，`mgr` 走 unchanged 分支，服务不动、状态不变（无副作用的动作路径冒烟） |
+| E3 | `r nodes.aether id=<节点> action=status dir=~/no-such-dir` | 明确报错（`cd: can't cd to …`），不是空结果 |
+| E4 | `r nodes.update id=<节点> aetherDir=off` 后 `nodes.list`，再改回 | `aetherSwitch` 为 null / 恢复；详情页的 AetherSwitch 卡片随之消失/出现 |
+| E5 | 真实切换：`r --timeout 1200 nodes.aether id=<节点> action=switch mode=<另一个模式>`，期间反复 `r nodes.aether id=<节点>` | 卡片显示"正在切换到 …"和 operation 阶段（checking → releasing → starting → ready）；完成后新模式 `ready`、旧模式 `stopped`，GPU 显存曲线随切换变化 |
+| E6 | 界面操作（人工）：详情页点击其他模式的"切换"、再点"全部停止" | 按钮在动作期间禁用；切换完成回到新状态；停止后所有模式 `stopped`、"全部停止"变灰 |
+| E7 | 断开网络或让主机休眠后再恢复，等节点重新 online | AetherSwitch 卡片自动恢复轮询，不再显示旧错误 |
 | D6 | 在系统设置里开启"减弱动态效果" | 脉冲点停止动画 |
 | D7 | 系统语言在 English 和简体中文之间切换 | 界面文案跟着切换 |
 | D8 | 执行 `scripts/mac.sh install` 后，打开"设置 → 通用 → 登录时启动" | 注销再登录后 App 自动启动 |

@@ -16,6 +16,16 @@ public enum SSHAuthMode: String, Codable, Sendable, CaseIterable {
     case password
 }
 
+/// AetherSwitch (server_mgr) integration for one node: where `mgr` lives on the
+/// remote host. nil = the integration is off for this node.
+public struct AetherSwitchConfig: Codable, Sendable, Hashable {
+    /// Directory containing `mgr` on the remote host; "~" is expanded by the
+    /// remote shell (default "~/server_mgr").
+    public var dir: String
+
+    public init(dir: String = "~/server_mgr") { self.dir = dir }
+}
+
 public struct NodeConfig: Codable, Sendable, Identifiable, Hashable {
     public var id: String
     public var name: String
@@ -38,11 +48,14 @@ public struct NodeConfig: Codable, Sendable, Identifiable, Hashable {
     public var showInMenuBar: Bool
     /// Menu bar value: "auto" (GPU for GPU servers, else CPU) | "cpu" | "gpu" | "temp".
     public var menuMetric: String
+    /// AetherSwitch integration (ssh nodes only); nil = off.
+    public var aetherSwitch: AetherSwitchConfig?
 
     public init(id: String? = nil, name: String, kind: NodeKind = .ssh, target: String = "", port: Int? = nil,
                 identityFile: String? = nil, auth: SSHAuthMode = .system, interval: Double = 1,
                 enabled: Bool = true, sshOptions: [String] = [], demoProfile: String? = nil,
-                icon: String? = nil, showInMenuBar: Bool = true, menuMetric: String = "auto") {
+                icon: String? = nil, showInMenuBar: Bool = true, menuMetric: String = "auto",
+                aetherSwitch: AetherSwitchConfig? = nil) {
         self.id = id ?? NodeConfig.makeID(from: name)
         self.name = name
         self.kind = kind
@@ -57,6 +70,7 @@ public struct NodeConfig: Codable, Sendable, Identifiable, Hashable {
         self.icon = icon
         self.showInMenuBar = showInMenuBar
         self.menuMetric = menuMetric
+        self.aetherSwitch = aetherSwitch
     }
 
     public static let localID = "local"
@@ -78,7 +92,7 @@ public struct NodeConfig: Codable, Sendable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, target, port, identityFile, auth, interval, enabled, sshOptions, demoProfile
-        case icon, showInMenuBar, menuMetric
+        case icon, showInMenuBar, menuMetric, aetherSwitch
     }
 
     public init(from decoder: Decoder) throws {
@@ -97,6 +111,7 @@ public struct NodeConfig: Codable, Sendable, Identifiable, Hashable {
         icon = try c.decodeIfPresent(String.self, forKey: .icon)
         showInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showInMenuBar) ?? true
         menuMetric = try c.decodeIfPresent(String.self, forKey: .menuMetric) ?? "auto"
+        aetherSwitch = try c.decodeIfPresent(AetherSwitchConfig.self, forKey: .aetherSwitch)
     }
 }
 

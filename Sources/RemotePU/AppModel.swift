@@ -66,6 +66,17 @@ struct LaunchOptions {
     }
 }
 
+/// AetherSwitch state shown on the node page; refreshed by AetherSection's poll.
+struct AetherUIState: Equatable {
+    var fetching = false
+    /// A switch/stop command is running (buttons disabled meanwhile).
+    var acting = false
+    var modes: [AetherMode] = []
+    var status: AetherStatus?
+    var error: String?
+    var updatedAt: Date?
+}
+
 /// Live state of one node (observed per card so only that card re-renders).
 @MainActor
 final class NodeLive: ObservableObject, Identifiable {
@@ -75,6 +86,7 @@ final class NodeLive: ObservableObject, Identifiable {
     @Published var hello: HelloMessage?
     @Published var latest: SampleMessage?
     @Published var lastAgentError: String?
+    @Published var aether = AetherUIState()
     private(set) var ring = RingBuffer<SampleMessage>(capacity: 1800)
 
     init(config: NodeConfig) {
@@ -434,6 +446,69 @@ final class AppModel: NSObject, ObservableObject {
         Task {
             if let id { await manager.retry(id) } else { await manager.retryAll() }
         }
+    }
+
+    // MARK: - AetherSwitch
+
+    /// Polls `mgr status --json` + `mgr list --json` on the node (one cheap
+    /// round trip over the multiplexed master). Skips if one is in flight.
+    func aetherRefresh(_ live: NodeLive) async {
+        guard live.config.kind == .ssh, let cfg = live.config.aetherSwitch else { return }
+        guard !live.aether.fetching else { return }
+        live.aether.fetching = true
+        do {
+            // A live-but-unhealthy mode makes the probe take up to ~35 s.
+            let res = try await manager.runRemote(nodeID: live.id, script: AetherScripts.statusAndList(dir: cfg.dir),
+                                                  timeout: 90)
+            guard res.status == 0 else {
+                throw AetherError(res.errorText.isEmpty ? "mgr exited with status \(res.status)" : res.errorText)
+            }
+            let (modes, status) = try AetherScripts.parse(res.stdout)
+            live.aether.modes = modes
+            live.aether.status = status
+            live.aether.error = nil
+            live.aether.updatedAt = Date()
+        } catch {
+            live.aether.error = Self.aetherErrorText(error)
+        }
+        live.aether.fetching = false
+    }
+
+    /// Runs `mgr switch <mode>` / `mgr stop`. A switch blocks until the mode is
+    /// ready (model loading can take minutes); AetherSection's poll keeps the UI
+    /// showing the operation stage from `mgr status` in the meantime.
+    func aetherAct(_ live: NodeLive, _ action: AetherAction) async {
+        guard live.config.kind == .ssh, let cfg = live.config.aetherSwitch else { return }
+        guard !live.aether.acting else { return }
+        live.aether.acting = true
+        let script: String
+        let timeout: Double
+        switch action {
+        case .switchTo(let mode):
+            script = AetherScripts.switchMode(dir: cfg.dir, mode: mode)
+            timeout = 1200 // mgr's own startup timeout is 900 s
+        case .stop:
+            script = AetherScripts.stop(dir: cfg.dir)
+            timeout = 180
+        }
+        var failure: String?
+        do {
+            let res = try await manager.runRemote(nodeID: live.id, script: script, timeout: timeout)
+            guard res.status == 0 else {
+                throw AetherError(res.errorText.isEmpty ? "mgr exited with status \(res.status)" : res.errorText)
+            }
+        } catch {
+            failure = Self.aetherErrorText(error)
+        }
+        await aetherRefresh(live) // resync with the remote; the action error survives it
+        if let failure { live.aether.error = failure }
+        live.aether.acting = false
+    }
+
+    /// mgr errors arrive as stderr lines ("ERROR: …"); keep the first, trimmed.
+    static func aetherErrorText(_ error: Error) -> String {
+        let raw = "\(error)".split(separator: "\n").first.map(String.init) ?? "\(error)"
+        return raw.trimmingCharacters(in: .whitespaces)
     }
 
     func setDemo(_ on: Bool) {

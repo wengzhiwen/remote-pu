@@ -190,6 +190,9 @@ struct NodeDetailContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
+            if live.config.kind == .ssh, live.config.aetherSwitch != nil {
+                AetherSection(live: live)
+            }
             if let s = live.latest {
                 kpis(s)
                 cpuSection(s)
@@ -394,6 +397,207 @@ private func powerSpecs(_ s: SampleMessage) -> [SeriesSpec] {
         specs.append(SeriesSpec(label: String(localized: "GPU"), metric: .node(.socGPUPower), slot: 2))
     }
     return specs
+}
+
+// MARK: - AetherSwitch
+
+/// GPU mode control for nodes with AetherSwitch configured: current mode,
+/// per-mode switch buttons and stop. Polls `mgr status` while visible (nothing
+/// here animates per sample — the section re-renders on every poll, not on
+/// every metric sample).
+struct AetherSection: View {
+    @ObservedObject var live: NodeLive
+    @EnvironmentObject var model: AppModel
+    @Environment(\.renderPreviewMode) private var renderPreviewMode
+
+    private var a: AetherUIState { live.aether }
+    private var opRunning: Bool { a.status?.operation?.inProgress == true }
+    private var busy: Bool { a.acting || opRunning }
+    private var nodeOnline: Bool { live.status.phase == .online || live.status.phase == .stale }
+    private var anyActive: Bool {
+        guard nodeOnline else { return false }
+        if a.status?.currentMode != nil { return true }
+        let active: Set<String> = ["ready", "busy", "loading", "unready", "running", "stopping"]
+        return a.status?.modes.contains { $0.state.map(active.contains) ?? false } ?? false
+    }
+
+    var body: some View {
+        SectionCard(title: String(localized: "AetherSwitch"), systemImage: "switch.2",
+                    trailing: AnyView(UpdatedAgo(date: a.updatedAt).font(.caption).foregroundStyle(.tertiary))) {
+            VStack(alignment: .leading, spacing: 10) {
+                if let op = a.status?.operation, op.inProgress == true {
+                    operationRow(op)
+                }
+                ForEach(a.conflictEntries, id: \.self) { c in
+                    Label { Text(verbatim: c) } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Palette.warning)
+                    }.font(.callout)
+                }
+                if let err = a.error {
+                    Label { Text(verbatim: err) } icon: {
+                        Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(Palette.critical)
+                    }.font(.callout)
+                }
+                if a.status == nil, a.error == nil {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(nodeOnline ? String(localized: "Loading") : live.status.phase.label)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                modeList
+                HStack {
+                    Button {
+                        Task { await model.aetherAct(live, .stop) }
+                    } label: {
+                        Label("Stop all", systemImage: "stop.fill")
+                    }
+                    .disabled(!anyActive || busy)
+                    .help("Stop every managed mode on this node")
+                    Spacer()
+                }
+            }
+        }
+        .task(id: live.id) {
+            // ImageRenderer never runs .task; offscreen renders use the last
+            // known state instead (see renderPreviewMode).
+            guard !renderPreviewMode else { return }
+            while !Task.isCancelled {
+                await model.aetherRefresh(live)
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var modeList: some View {
+        let modes = a.modes
+        if modes.isEmpty, a.status != nil {
+            Text("No modes registered").font(.callout).foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(modes) { m in
+                    modeRow(m)
+                }
+            }
+        }
+    }
+
+    private func modeRow(_ m: AetherMode) -> some View {
+        let rep = a.status?.report(for: m.mode)
+        let current = a.status?.currentMode == m.mode
+        return HStack(alignment: .center, spacing: 10) {
+            Image(systemName: aetherStateSymbol(rep?.state))
+                .foregroundStyle(aetherStateColor(rep?.state))
+                .help(aetherStateLabel(rep?.state))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(verbatim: m.name ?? m.mode)
+                    .font(.callout.weight(current ? .semibold : .regular))
+                    .lineLimit(1)
+                Text(verbatim: m.mode).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                if current, let url = rep?.probe?.publicUrl {
+                    Text(verbatim: url).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                if let e = rep?.error, !e.isEmpty {
+                    Text(verbatim: e).font(.caption2).foregroundStyle(Palette.critical).lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+            Text(aetherStateLabel(rep?.state))
+                .font(.caption).foregroundStyle(aetherStateColor(rep?.state))
+            if current {
+                Text("Current")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Capsule().fill(Palette.track.opacity(0.7)))
+            } else {
+                Button(String(localized: "Switch")) {
+                    Task { await model.aetherAct(live, .switchTo(m.mode)) }
+                }
+                .disabled(busy || !nodeOnline)
+            }
+        }
+        .padding(.vertical, 1)
+    }
+
+    private func operationRow(_ op: AetherStatus.Operation) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(opText(op)).font(.callout).foregroundStyle(.secondary)
+            if let err = op.error, !err.isEmpty {
+                Text(verbatim: err).font(.caption).foregroundStyle(Palette.critical).lineLimit(1)
+            }
+        }
+    }
+
+    private func opText(_ op: AetherStatus.Operation) -> String {
+        let head: String
+        switch op.action {
+        case "switch": head = String(format: String(localized: "Switching to %@"), op.target ?? op.mode ?? "")
+        case "restart": head = String(format: String(localized: "Restarting %@"), op.target ?? op.mode ?? "")
+        case "stop": head = String(localized: "Stopping")
+        default: head = (op.action ?? "") + " " + (op.target ?? "")
+        }
+        return head + " · " + aetherStageLabel(op.stage)
+    }
+}
+
+extension AetherUIState {
+    var conflictEntries: [String] { status?.conflicts ?? [] }
+}
+
+/// mgr's per-mode states, mapped to icon + colour (a label always accompanies
+/// colour — never colour alone).
+func aetherStateSymbol(_ state: String?) -> String {
+    switch state {
+    case "ready", "running": return "checkmark.circle.fill"
+    case "busy": return "bolt.fill"
+    case "loading": return "arrow.triangle.2.circlepath"
+    case "unready": return "exclamationmark.triangle.fill"
+    case "stopping": return "arrow.triangle.2.circlepath"
+    case "failed": return "xmark.circle.fill"
+    case "conflict": return "exclamationmark.triangle.fill"
+    default: return "pause.circle" // stopped / unknown
+    }
+}
+
+func aetherStateColor(_ state: String?) -> Color {
+    switch state {
+    case "ready", "running": return Palette.good
+    case "busy", "loading": return Palette.accent
+    case "unready": return Palette.warning
+    case "failed", "conflict": return Palette.critical
+    default: return .secondary
+    }
+}
+
+func aetherStateLabel(_ state: String?) -> String {
+    switch state {
+    case "ready": return String(localized: "Ready")
+    case "busy": return String(localized: "Busy")
+    case "loading": return String(localized: "Loading")
+    case "unready": return String(localized: "Not ready")
+    case "stopping": return String(localized: "Stopping")
+    case "running": return String(localized: "Running")
+    case "failed": return String(localized: "Failed")
+    case "conflict": return String(localized: "Conflict")
+    default: return String(localized: "Stopped")
+    }
+}
+
+func aetherStageLabel(_ stage: String?) -> String {
+    switch stage {
+    case "begin": return String(localized: "Preparing")
+    case "checking": return String(localized: "Checking")
+    case "releasing": return String(localized: "Releasing GPU")
+    case "starting": return String(localized: "Starting")
+    case "loading": return String(localized: "Loading model")
+    case "ready", "complete": return String(localized: "Complete")
+    case "stopping": return String(localized: "Stopping")
+    case "force-stopping": return String(localized: "Force stopping")
+    case "failed", "startup-failed": return String(localized: "Failed")
+    default: return stage ?? ""
+    }
 }
 
 struct InfoChips: View {

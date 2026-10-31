@@ -77,6 +77,19 @@ public actor NodeRunner {
 
     public func currentStatus() -> NodeStatus { status }
 
+    /// Runs a one-shot `sh -c` script over this node's ControlMaster (used by
+    /// the AetherSwitch integration). Only valid while the master is up; stream
+    /// sampling continues unaffected on its own multiplexed client.
+    public func runRemote(_ script: String, timeout: Double = 60) async throws -> ProcessResult {
+        guard config.kind == .ssh else {
+            throw RunnerError.configuration(String(localized: "Remote commands need an ssh node"))
+        }
+        guard master != nil, masterExit == nil else {
+            throw RunnerError.network(String(localized: "Node is not connected"))
+        }
+        return try await remote(sshCommand, script, timeout: timeout)
+    }
+
     // MARK: - loop
 
     private func log(_ message: String) {

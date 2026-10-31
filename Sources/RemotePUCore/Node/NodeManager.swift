@@ -47,6 +47,15 @@ public actor NodeManager {
         await runners[id]?.retryNow()
     }
 
+    /// Runs a one-shot script on a node over its existing ssh connection
+    /// (see NodeRunner.runRemote); throws when the node is not connected.
+    public func runRemote(nodeID: String, script: String, timeout: Double = 60) async throws -> ProcessResult {
+        guard let runner = runners[nodeID] else {
+            throw RunnerError.configuration("node \(nodeID) is not running")
+        }
+        return try await runner.runRemote(script, timeout: timeout)
+    }
+
     public func retryAll() async {
         for r in runners.values { await r.retryNow() }
     }

@@ -49,12 +49,13 @@ open -n dist/RemotePU.app --args --data-dir /tmp/rpu-test --no-keychain [--demo]
 | `ping` | | 版本、pid、数据目录、helper 路径 |
 | `state` | | 所有节点（配置、状态、最新指标摘要）+ UI 状态 + 菜单栏汇总 |
 | `nodes.list` | | 节点配置（含 demo） |
-| `nodes.add` | `name target [kind=ssh\|local] [auth=system\|password] [password] [persist=true] [port] [identityFile] [interval] [enabled] [sshOptions:=[..]] [id]` | 添加节点；带 password 时默认 auth=password |
+| `nodes.add` | `name target [kind=ssh\|local] [auth=system\|password] [password] [persist=true] [port] [identityFile] [interval] [enabled] [sshOptions:=[..]] [aetherDir=<dir\|off>] [id]` | 添加节点；带 password 时默认 auth=password |
 | `nodes.update` | `id` + 同上字段 | 修改节点 |
 | `nodes.remove` | `id` | 删除节点（同时删除钥匙串密码） |
 | `nodes.setPassword` | `id password [persist=true]` | 设置密码；`persist=false` 只存内存 |
 | `nodes.reconnect` | `[id]` | 立即重连（无 id = 全部）；也用于认证失败后的手动重试 |
 | `nodes.sample` | `id` | 采集器原始 hello + 最新 sample（NDJSON v1 字段） |
+| `nodes.aether` | `id [action=status\|switch\|restart\|stop] [mode=<id>] [dir=<path>] [timeout=1200]` | 节点上的 AetherSwitch（`mgr`）：默认查状态；switch/restart/stop 会执行 mgr 并阻塞到完成（switch 要加载模型，rpuctl 记得 `--timeout ≥ 1200`）；`dir` 可临时覆盖节点配置的目录，未配置时默认 `~/server_mgr`。返回 `modes`（`mgr list`）+ `status`（`mgr status --json`） |
 | `nodes.wait` | `id [phase=online] [timeout=60]` | 阻塞直到节点进入某状态，超时报错并给出当前状态/原因 |
 | `history.query` | `id metric [range=1h\|秒数] [points=200]` | 从 SQLite 读序列，返回 `[[ts, avg, max], ...]`；metric 如 `cpu_util`、`gpu:<key>:util`（key 见 `state` 的 gpuKeys） |
 | `history.flush` | | 立即落盘 + 聚合，返回各表行数 |
