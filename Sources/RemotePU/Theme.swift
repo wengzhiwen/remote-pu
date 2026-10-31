@@ -265,28 +265,97 @@ enum NodeIcons {
 // MARK: - Live feedback
 
 /// Radar-style pulse for "online and streaming"; static when Reduce Motion is on.
+/// The halo is a repeating CABasicAnimation on a CALayer, so it plays in the
+/// window server's render process. A SwiftUI `repeatForever` animation instead
+/// re-runs the hosting view's layout at frame rate (~120 Hz) — keeping the whole
+/// app busy and making the dashboard stutter while scrolling. The dot itself
+/// stays SwiftUI so offscreen renders (`ui.render`) still show it; NSViews draw
+/// as empty there.
 struct PulseDot: View {
     var color: Color = Palette.good
     var size: CGFloat = 8
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var animate = false
 
     var body: some View {
         ZStack {
-            if !reduceMotion {
-                Circle()
-                    .fill(color.opacity(0.45))
-                    .scaleEffect(animate ? 2.6 : 1)
-                    .opacity(animate ? 0 : 0.9)
-            }
             Circle().fill(color)
+            if !reduceMotion {
+                PulseHalo(color: color, side: size)
+            }
         }
         .frame(width: size, height: size)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { animate = true }
-        }
         .accessibilityHidden(true)
+    }
+}
+
+/// The expanding halo around `PulseDot`'s dot.
+private struct PulseHalo: NSViewRepresentable {
+    let color: Color
+    let side: CGFloat
+
+    func makeNSView(context: Context) -> PulseHaloView {
+        PulseHaloView(side: side, color: color)
+    }
+
+    func updateNSView(_ view: PulseHaloView, context: Context) {
+        view.side = side
+        view.setColor(color)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PulseHaloView, context: Context) -> CGSize? {
+        CGSize(width: side, height: side)
+    }
+}
+
+/// One circular sublayer that scales 1→2.6 while fading out, forever. It draws
+/// outside the view's bounds (`masksToBounds` stays false), which is what lets
+/// the halo expand past the dot.
+final class PulseHaloView: NSView {
+    var side: CGFloat {
+        didSet { needsLayout = true }
+    }
+    private let halo = CALayer()
+
+    init(side: CGFloat, color: Color) {
+        self.side = side
+        super.init(frame: NSRect(x: 0, y: 0, width: side, height: side))
+        wantsLayer = true
+        layer?.addSublayer(halo)
+        setColor(color)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func setColor(_ c: Color) {
+        halo.backgroundColor = NSColor(c).usingColorSpace(.deviceRGB)?
+            .withAlphaComponent(0.45).cgColor
+    }
+
+    override func layout() {
+        super.layout()
+        halo.frame = bounds
+        halo.cornerRadius = side / 2
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            halo.removeAnimation(forKey: "pulse")
+            return
+        }
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1
+        scale.toValue = 2.6
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.9
+        fade.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = 1.6
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        halo.add(group, forKey: "pulse")
     }
 }
 

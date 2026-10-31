@@ -43,9 +43,10 @@ struct MeterRow: View {
                 if let symbol = severity.symbol {
                     Image(systemName: symbol).foregroundStyle(severity.color ?? .secondary).imageScale(.small)
                 }
+                // No numericText transition here: values tick once per sample, so a
+                // ~0.5 s roll animation restarts forever and kept the render loop
+                // (and with it the whole dashboard) busy at frame rate.
                 Text(value).monospacedDigit()
-                    .contentTransition(.numericText())
-                    .animation(.snappy, value: value)
                 if let detail { Text(detail).foregroundStyle(.secondary).monospacedDigit() }
             }
             .font(.callout)
@@ -65,9 +66,8 @@ struct StatTile: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 4) {
-                Text(value).font(.title2.weight(.semibold))
-                    .contentTransition(.numericText())
-                    .animation(.snappy, value: value)
+                // See MeterRow: animated value rolls cost frame-rate re-renders.
+                Text(value).font(.title2.weight(.semibold)).monospacedDigit()
                 if let symbol = severity.symbol {
                     Image(systemName: symbol).foregroundStyle(severity.color ?? .secondary)
                 }
@@ -140,8 +140,13 @@ private struct LoadedSeries: Identifiable {
 
 /// Time-series chart for one measure (one y-axis). Multiple series share the unit
 /// (e.g. per-GPU utilisation). Hover shows a crosshair and a tooltip with all values.
+///
+/// Deliberately observes nothing (`live` and `model` are plain lets): every sample
+/// tick and every summary change would otherwise re-layout all marks on the page.
+/// Instead the task below pulls data on its own cadence (live 2 s, stored 15 s).
 struct MetricChart: View {
-    @ObservedObject var live: NodeLive
+    let live: NodeLive
+    let model: AppModel
     let title: String
     let series: [SeriesSpec]
     let range: TimeRange
@@ -151,18 +156,11 @@ struct MetricChart: View {
     var scale: Double = 1
     var height: CGFloat = 150
 
-    @EnvironmentObject private var model: AppModel
-    @State private var stored: [String: [SeriesPoint]] = [:]
+    @State private var points: [String: [SeriesPoint]] = [:]
     @State private var hover: Date?
 
     private var data: [LoadedSeries] {
-        let raw: [LoadedSeries]
-        if range.isLive || live.isDemo {
-            let since = Date().addingTimeInterval(-range.seconds)
-            raw = series.map { LoadedSeries(spec: $0, points: live.series($0.metric, since: since)) }
-        } else {
-            raw = series.map { LoadedSeries(spec: $0, points: stored[$0.id] ?? []) }
-        }
+        let raw = series.map { LoadedSeries(spec: $0, points: points[$0.id] ?? []) }
         guard scale != 1 else { return raw }
         return raw.map { s in
             LoadedSeries(spec: s.spec, points: s.points.map { SeriesPoint(t: $0.t, avg: $0.avg / scale, max: $0.max / scale) })
@@ -185,12 +183,20 @@ struct MetricChart: View {
             }
         }
         .task(id: TaskKey(range: range, node: live.id, series: series.map(\.id))) {
-            guard !range.isLive, !live.isDemo else { return }
+            let livePoll: UInt64 = 2_000_000_000
+            let storedPoll: UInt64 = 15_000_000_000
             while !Task.isCancelled {
                 var next: [String: [SeriesPoint]] = [:]
-                for s in series { next[s.id] = await model.series(for: live, metric: s.metric, range: range) }
-                stored = next
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                if range.isLive || live.isDemo {
+                    let since = Date().addingTimeInterval(-range.seconds)
+                    for s in series { next[s.id] = live.series(s.metric, since: since) }
+                    if next != points { points = next } // idle nodes: skip the re-render
+                    try? await Task.sleep(nanoseconds: livePoll)
+                } else {
+                    for s in series { next[s.id] = await model.series(for: live, metric: s.metric, range: range) }
+                    points = next
+                    try? await Task.sleep(nanoseconds: storedPoll)
+                }
             }
         }
     }

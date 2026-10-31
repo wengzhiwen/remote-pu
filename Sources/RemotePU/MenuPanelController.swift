@@ -14,11 +14,13 @@ import SwiftUI
 final class MenuPanelController: NSObject, NSPopoverDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let popover = NSPopover()
+    private weak var model: AppModel?
     private var lastClosedAt = Date.distantPast
 
     var statusButton: NSStatusBarButton? { statusItem.button }
 
     init(model: AppModel) {
+        self.model = model
         super.init()
         // Visibility and placement are saved by app + autosave name. Keep
         // isolated data directories from sharing the live app's saved state.
@@ -27,12 +29,17 @@ final class MenuPanelController: NSObject, NSPopoverDelegate {
         statusItem.autosaveName = "RemotePU-\(identity)"
         statusItem.isVisible = true
         popover.behavior = .transient // dismiss on outside click / Escape
-        popover.contentViewController = NSHostingController(rootView: MenuBarPanel().environmentObject(model))
+        installPanelContent()
         popover.delegate = self
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(toggle)
         }
+    }
+
+    private func installPanelContent() {
+        guard let model else { return }
+        popover.contentViewController = NSHostingController(rootView: MenuBarPanel().environmentObject(model))
     }
 
     var isShown: Bool { popover.isShown }
@@ -58,10 +65,14 @@ final class MenuPanelController: NSObject, NSPopoverDelegate {
 
     private func show() {
         guard let button = statusItem.button else { return }
+        // Content is dropped on close so the hidden panel stops re-rendering on
+        // every sample; rebuild it each time the panel opens.
+        if popover.contentViewController == nil { installPanelContent() }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 
     func popoverDidClose(_ notification: Notification) {
         lastClosedAt = Date()
+        popover.contentViewController = nil
     }
 }

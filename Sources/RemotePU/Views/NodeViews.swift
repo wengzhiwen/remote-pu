@@ -86,7 +86,7 @@ struct NodeCard: View {
                                  fraction: fraction(s.mem?.used, s.mem?.total),
                                  severity: Severity.fill(fraction(s.mem?.used, s.mem?.total)))
                     }
-                    Sparkline(values: live.series(.node(.cpuUtil), since: Date().addingTimeInterval(-300)).map(\.avg))
+                    Sparkline(values: live.series(.node(.cpuUtil), since: Date().addingTimeInterval(-300), maxPoints: 90).map(\.avg))
                         .frame(width: 70, height: 34)
                         .accessibilityLabel("CPU utilisation, last 5 minutes")
                 }
@@ -94,7 +94,7 @@ struct NodeCard: View {
                     HStack(alignment: .top, spacing: 16) {
                         GPURowCompact(info: live.gpuInfo(g.idx), sample: g, unified: live.gpuInfo(g.idx)?.unified == true)
                         Sparkline(values: live.series(.gpu(key: live.gpuKeys[g.idx] ?? "idx\(g.idx)", .util),
-                                                      since: Date().addingTimeInterval(-300)).map(\.avg),
+                                                      since: Date().addingTimeInterval(-300), maxPoints: 90).map(\.avg),
                                   color: Palette.series(g.idx))
                             .frame(width: 70, height: 34)
                             .accessibilityLabel("GPU \(g.idx) utilisation, last 5 minutes")
@@ -285,11 +285,11 @@ struct NodeDetailContent: View {
                 CoreGrid(cores: cores, clusters: live.hello?.cpu?.clusters ?? [])
             }
             HStack(alignment: .top, spacing: 14) {
-                MetricChart(live: live, title: String(localized: "Utilisation (%)"),
+                MetricChart(live: live, model: model, title: String(localized: "Utilisation (%)"),
                             series: [SeriesSpec(label: "CPU", metric: .node(.cpuUtil), slot: 0)],
                             range: model.range, yDomain: 0...100, format: { Fmt.number($0, digits: 0) })
                 if live.hello?.caps?.cpuTemp != false {
-                    MetricChart(live: live, title: String(localized: "Temperature (°C)"),
+                    MetricChart(live: live, model: model, title: String(localized: "Temperature (°C)"),
                                 series: [SeriesSpec(label: String(localized: "CPU"), metric: .node(.cpuTemp), slot: 0)],
                                 range: model.range, format: { Fmt.number($0, digits: 0) })
                 }
@@ -307,7 +307,7 @@ struct NodeDetailContent: View {
                 MeterRow(label: String(localized: "Swap"), value: Fmt.gibPair(s.mem?.swapUsed, st),
                          fraction: fraction(s.mem?.swapUsed, st))
             }
-            MetricChart(live: live, title: String(localized: "Memory used (GB)"),
+            MetricChart(live: live, model: model, title: String(localized: "Memory used (GB)"),
                         series: [SeriesSpec(label: String(localized: "Used"), metric: .node(.memUsed), slot: 0)],
                         range: model.range,
                         yDomain: s.mem?.total.map { 0...($0 / 1_073_741_824) },
@@ -331,22 +331,22 @@ struct NodeDetailContent: View {
                         }
                     }
                     ColumnsLayout(minWidth: 320, spacing: 14) {
-                        MetricChart(live: live, title: String(localized: "GPU utilisation (%)"), series: specs(.util),
+                        MetricChart(live: live, model: model, title: String(localized: "GPU utilisation (%)"), series: specs(.util),
                                     range: model.range, yDomain: 0...100, format: { Fmt.number($0, digits: 0) })
-                        MetricChart(live: live, title: String(localized: "GPU temperature (°C)"), series: specs(.temp),
+                        MetricChart(live: live, model: model, title: String(localized: "GPU temperature (°C)"), series: specs(.temp),
                                     range: model.range, format: { Fmt.number($0, digits: 0) })
                         if gpus.contains(where: { $0.powerW != nil }) {
-                            MetricChart(live: live, title: String(localized: "GPU power (W)"), series: specs(.power),
+                            MetricChart(live: live, model: model, title: String(localized: "GPU power (W)"), series: specs(.power),
                                         range: model.range, format: Fmt.axis)
                         }
                         if !unified {
-                            MetricChart(live: live, title: String(localized: "VRAM used (GB)"),
+                            MetricChart(live: live, model: model, title: String(localized: "VRAM used (GB)"),
                                         series: specs(.memUsed), range: model.range,
                                         yDomain: gpus.compactMap(\.memTotal).max().map { 0...($0 / 1_073_741_824) },
                                         format: { Fmt.number($0, digits: 0) }, scale: 1_073_741_824)
                         }
                         if gpus.contains(where: { $0.smMhz != nil }) {
-                            MetricChart(live: live, title: String(localized: "GPU clock (MHz)"), series: specs(.smMhz),
+                            MetricChart(live: live, model: model, title: String(localized: "GPU clock (MHz)"), series: specs(.smMhz),
                                         range: model.range, format: { Fmt.number($0, digits: 0) })
                         }
                     }
@@ -372,11 +372,11 @@ struct NodeDetailContent: View {
             HStack(alignment: .top, spacing: 14) {
                 let specs = powerSpecs(s)
                 if !specs.isEmpty {
-                    MetricChart(live: live, title: String(localized: "Power (W)"), series: specs, range: model.range,
+                    MetricChart(live: live, model: model, title: String(localized: "Power (W)"), series: specs, range: model.range,
                                 format: Fmt.axis)
                 }
                 if !(s.fans ?? []).isEmpty {
-                    MetricChart(live: live, title: String(localized: "Fan speed (rpm, mean)"),
+                    MetricChart(live: live, model: model, title: String(localized: "Fan speed (rpm, mean)"),
                                 series: [SeriesSpec(label: String(localized: "Fans"), metric: .node(.fanRPM), slot: 0)],
                                 range: model.range, format: { Fmt.number($0, digits: 0) })
                 }

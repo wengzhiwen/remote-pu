@@ -91,8 +91,10 @@ final class NodeLive: ObservableObject, Identifiable {
         latest = s
     }
 
-    /// Ring-buffer series since `since`, thinned to at most `maxPoints`.
-    func series(_ metric: MetricRef, since: Date, maxPoints: Int = 450) -> [SeriesPoint] {
+    /// Ring-buffer series since `since`, thinned to at most `maxPoints`. Charts
+    /// rebuild every mark on every sample, so the cap trades resolution for a
+    /// much cheaper per-sample relayout; ~3 px per point is visually identical.
+    func series(_ metric: MetricRef, since: Date, maxPoints: Int = 150) -> [SeriesPoint] {
         let keys = gpuKeys
         let cutoff = since.timeIntervalSince1970
         let points = ring.elements.compactMap { s -> SeriesPoint? in
@@ -503,6 +505,9 @@ final class AppModel: NSObject, ObservableObject {
     func openMainWindow(select: SidebarItem? = nil) {
         if let select { selection = select }
         let w = mainWindow ?? makeMainWindow()
+        if w.contentViewController == nil {
+            w.contentViewController = NSHostingController(rootView: MainWindow().environmentObject(self))
+        }
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -582,5 +587,11 @@ extension AppModel: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let w = notification.object as? NSWindow, w === mainWindow else { return }
         mainWindowDidChange(visible: false)
+        // The kept-alive window (isReleasedWhenClosed = false) would keep its
+        // SwiftUI graph re-rendering on every sample while hidden; drop the
+        // content once the close animation is done and rebuild it on next open.
+        DispatchQueue.main.async {
+            if !w.isVisible { w.contentViewController = nil }
+        }
     }
 }
