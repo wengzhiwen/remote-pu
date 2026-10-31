@@ -3,6 +3,8 @@
 /* Navigation & windows */
 "Overview" = "概览";
 "Nodes" = "节点";
+"Hide Sidebar" = "隐藏边栏";
+"Show Sidebar" = "显示边栏";
 "General" = "通用";
 "About" = "关于";
 "Range" = "时间范围";

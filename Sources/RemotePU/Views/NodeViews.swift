@@ -23,7 +23,6 @@ struct OverviewView: View {
                 OverviewGrid()
             }
         }
-        .navigationTitle("Overview")
     }
 }
 
@@ -180,8 +179,6 @@ struct NodeDetailView: View {
         ScrollView {
             NodeDetailContent(live: live)
         }
-        .navigationTitle(live.config.name)
-        .navigationSubtitle(live.hello?.subtitle ?? live.config.target)
     }
 }
 

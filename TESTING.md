@@ -47,6 +47,7 @@ export RPU_MAC_HOST=user@mac-a               # 只有从非 Mac 机器运行 scr
 
 - 修复仪表盘（尤其节点详情页）滚轮滚动不顺畅：隔离实例（`--demo`，本机 + 两个 demo 节点全部 1 s 间隔）空闲流式时主线程忙时从 ~70% 降到 ~12%（`sample` 前后对比；Overview ~9%，窗口全关 ~2%）。三个原因各有修复：`PulseDot` 的 `repeatForever` 动画改为 CALayer 上的 CABasicAnimation（渲染服务进程执行）；数值文本的 `numericText`+`.snappy` 过渡每秒重启导致渲染循环永不停，已移除；`MetricChart` 不再观察 `NodeLive`/`AppModel`，改由 task 定时拉取（实时 2 s、历史 15 s），实时序列点数上限 450→150。另外关闭的主窗口与菜单面板现在会卸载 SwiftUI 内容，不再隐藏时持续按采样重绘。
 - 回归：Swift 20 项、Python 14 项测试通过；`ui.render` 概览 / 节点详情 / 菜单面板（深色）渲染正常（离屏渲染中状态圆点为实心、无光晕，属预期）；菜单面板开合正常。
+- 仪表盘顶栏重构：时间范围与监测状态移入侧栏顶部的抽屉（状态行常显，范围可折叠、当前项带勾选）。放弃 SwiftUI `.toolbar` 与 `NavigationSplitView`（macOS 26 下同步进手建 NSWindow 的系统工具栏有两个毛病：详情页滚动内容会盖住标题栏，系统侧栏按钮点击后会在标题栏左右大幅迁移），改为窗口内自绘控制栏（侧栏开关 + 页面标题 + 全部重连），侧栏为自绘列（固定宽 + 毛玻璃材质，Option+Cmd+S 开关）；详情页内容宽度上限 950 pt 居中，侧栏开合与宽窗口缩放不再引起图表/KPI 重排换行（只平移）。`ui.range`、`ui.select` 回归正常，Swift 20 项 + Python 14 项测试通过。
 
 ## 集成测试
 
