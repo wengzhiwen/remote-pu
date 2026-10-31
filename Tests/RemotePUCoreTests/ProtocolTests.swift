@@ -95,6 +95,19 @@ let wslSample = #"""
         #expect(r.count == 3)
     }
 
+    @Test func thinSeriesAveragesAndKeepsMax() {
+        let pts = (0..<10).map { SeriesPoint(t: Date(timeIntervalSince1970: Double($0)), avg: Double($0), max: Double($0) ) }
+        let thinned = thinSeries(pts, to: 3)
+        // stride = ceil(10/3) = 4 → chunks 0..3, 4..7, 8..9
+        #expect(thinned.count == 3)
+        #expect(thinned[0].avg == 1.5)   // mean 0,1,2,3
+        #expect(thinned[0].max == 3)
+        #expect(thinned[2].avg == 8.5)   // mean 8,9
+        #expect(thinned[2].max == 9)
+        #expect(thinned[0].t == pts[3].t) // chunk end timestamps the points
+        #expect(thinSeries(pts, to: 10) == pts) // under the cap: untouched
+    }
+
     @Test func nodeIDs() {
         #expect(NodeConfig.makeID(from: "GPU box #1") == "gpu-box-1")
         #expect(NodeConfig.makeID(from: "user@mac-b") == "user-mac-b")

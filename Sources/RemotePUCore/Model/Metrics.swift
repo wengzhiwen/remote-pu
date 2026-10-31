@@ -111,6 +111,19 @@ public struct SeriesPoint: Sendable, Equatable, Codable {
     }
 }
 
+/// Uniformly thin a series to at most `maxPoints`, chunk-averaging `avg` and
+/// keeping each chunk's `max`. Charts rebuild every mark per update, so series
+/// are capped before plotting.
+public func thinSeries(_ points: [SeriesPoint], to maxPoints: Int) -> [SeriesPoint] {
+    guard points.count > maxPoints else { return points }
+    let stride = Int((Double(points.count) / Double(maxPoints)).rounded(.up))
+    return Swift.stride(from: 0, to: points.count, by: stride).map { i in
+        let chunk = points[i..<min(points.count, i + stride)]
+        let avg = chunk.reduce(0) { $0 + $1.avg } / Double(chunk.count)
+        return SeriesPoint(t: chunk.last!.t, avg: avg, max: chunk.map(\.max).max() ?? avg)
+    }
+}
+
 public extension HelloMessage {
     /// GPU idx → stable key (uuid when available).
     var gpuKeys: [Int: String] {

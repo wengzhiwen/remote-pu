@@ -138,6 +138,20 @@ private struct LoadedSeries: Identifiable {
     let points: [SeriesPoint]
 }
 
+/// Set for offscreen `ui.render` output. ImageRenderer never runs `.task`, so
+/// the chart's pulled data would stay empty; in this mode the body reads the
+/// ring synchronously instead (fine offscreen — it is rendered once).
+private struct RenderPreviewModeKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var renderPreviewMode: Bool {
+        get { self[RenderPreviewModeKey.self] }
+        set { self[RenderPreviewModeKey.self] = newValue }
+    }
+}
+
 /// Time-series chart for one measure (one y-axis). Multiple series share the unit
 /// (e.g. per-GPU utilisation). Hover shows a crosshair and a tooltip with all values.
 ///
@@ -158,9 +172,16 @@ struct MetricChart: View {
 
     @State private var points: [String: [SeriesPoint]] = [:]
     @State private var hover: Date?
+    @Environment(\.renderPreviewMode) private var renderPreviewMode
 
     private var data: [LoadedSeries] {
-        let raw = series.map { LoadedSeries(spec: $0, points: points[$0.id] ?? []) }
+        let raw: [LoadedSeries]
+        if renderPreviewMode {
+            let since = Date().addingTimeInterval(-range.seconds)
+            raw = series.map { LoadedSeries(spec: $0, points: live.series($0.metric, since: since)) }
+        } else {
+            raw = series.map { LoadedSeries(spec: $0, points: points[$0.id] ?? []) }
+        }
         guard scale != 1 else { return raw }
         return raw.map { s in
             LoadedSeries(spec: s.spec, points: s.points.map { SeriesPoint(t: $0.t, avg: $0.avg / scale, max: $0.max / scale) })
@@ -183,19 +204,40 @@ struct MetricChart: View {
             }
         }
         .task(id: TaskKey(range: range, node: live.id, series: series.map(\.id))) {
-            let livePoll: UInt64 = 2_000_000_000
-            let storedPoll: UInt64 = 15_000_000_000
-            while !Task.isCancelled {
-                var next: [String: [SeriesPoint]] = [:]
-                if range.isLive || live.isDemo {
+            if range.isLive || live.isDemo {
+                // First paint from the ring only (synchronous, so the chart is
+                // never blank — also all an offscreen ui.render captures).
+                var first: [String: [SeriesPoint]] = [:]
+                for s in series { first[s.id] = live.series(s.metric, since: Date().addingTimeInterval(-range.seconds)) }
+                points = first
+                // Then merge in what the previous run persisted, fetched once;
+                // this run's data keeps coming from the ring, so the 15-minute
+                // window survives a restart instead of starting blank.
+                var seed: [String: [SeriesPoint]] = [:]
+                if !live.isDemo {
                     let since = Date().addingTimeInterval(-range.seconds)
-                    for s in series { next[s.id] = live.series(s.metric, since: since) }
+                    for s in series { seed[s.id] = await model.historySeed(for: live, metric: s.metric, since: since) }
+                }
+                while !Task.isCancelled {
+                    let since = Date().addingTimeInterval(-range.seconds)
+                    var next = seed
+                    for s in series {
+                        // The seed is static; once the window slides past this
+                        // launch (uptime > range), drop its points — Charts
+                        // draws out-of-domain marks outside the plot area, which
+                        // showed up as a line spilling out past the left edge.
+                        let inWindow = (seed[s.id] ?? []).filter { $0.t >= since }
+                        next[s.id] = thinSeries(inWindow + live.series(s.metric, since: since), to: 150)
+                    }
                     if next != points { points = next } // idle nodes: skip the re-render
-                    try? await Task.sleep(nanoseconds: livePoll)
-                } else {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+            } else {
+                while !Task.isCancelled {
+                    var next: [String: [SeriesPoint]] = [:]
                     for s in series { next[s.id] = await model.series(for: live, metric: s.metric, range: range) }
                     points = next
-                    try? await Task.sleep(nanoseconds: storedPoll)
+                    try? await Task.sleep(nanoseconds: 15_000_000_000)
                 }
             }
         }

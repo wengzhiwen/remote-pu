@@ -101,13 +101,7 @@ final class NodeLive: ObservableObject, Identifiable {
             guard s.ts >= cutoff, let v = metric.value(in: s, gpuKeys: keys) else { return nil }
             return SeriesPoint(t: s.date, avg: v, max: v)
         }
-        guard points.count > maxPoints else { return points }
-        let stride = Int((Double(points.count) / Double(maxPoints)).rounded(.up))
-        return Swift.stride(from: 0, to: points.count, by: stride).map { i in
-            let chunk = points[i..<min(points.count, i + stride)]
-            let avg = chunk.reduce(0) { $0 + $1.avg } / Double(chunk.count)
-            return SeriesPoint(t: chunk.last!.t, avg: avg, max: chunk.map(\.max).max() ?? avg)
-        }
+        return thinSeries(points, to: maxPoints)
     }
 
     func gpuInfo(_ idx: Int) -> GPUInfo? { hello?.gpus?.first { $0.idx == idx } }
@@ -482,6 +476,16 @@ final class AppModel: NSObject, ObservableObject {
         let retention = HistoryStore.Retention(raw5sDays: settings.retention5sDays, rollup1mDays: settings.retention1mDays)
         return (try? await history.query(nodeID: live.id, metric: metric, from: since, to: Date(),
                                          maxPoints: 400, retention: retention)) ?? []
+    }
+
+    /// Samples the previous run persisted, up to this launch (`startedAt`). The
+    /// live range reads only the in-memory ring, so without seeding it a restart
+    /// would blank out the last session's chart.
+    func historySeed(for live: NodeLive, metric: MetricRef, since: Date) async -> [SeriesPoint] {
+        guard let history, !live.isDemo else { return [] }
+        let retention = HistoryStore.Retention(raw5sDays: settings.retention5sDays, rollup1mDays: settings.retention1mDays)
+        return (try? await history.query(nodeID: live.id, metric: metric, from: since, to: startedAt,
+                                         maxPoints: 90, retention: retention)) ?? []
     }
 
     // MARK: - windows

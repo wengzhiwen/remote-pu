@@ -436,6 +436,7 @@ extension AppModel {
         }
         let view = content
             .environmentObject(self)
+            .environment(\.renderPreviewMode, true)
             .frame(width: page == "menu" ? MenuBarPanel.width : width)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, dark ? .dark : .light)
