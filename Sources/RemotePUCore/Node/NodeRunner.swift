@@ -96,12 +96,18 @@ public actor NodeRunner {
         env.log.log("node:\(config.id)", message)
     }
 
-    private func setStatus(_ phase: NodePhase, _ message: String? = nil, retryAt: Date? = nil) {
+    private func setStatus(_ phase: NodePhase, _ message: String? = nil, retryAt: Date? = nil, gaveUp: Bool = false) {
         let changed = phase != status.phase
-        status = NodeStatus(phase: phase, message: message, since: changed ? Date() : status.since, retryAt: retryAt)
+        status = NodeStatus(phase: phase, message: message, since: changed ? Date() : status.since,
+                            retryAt: retryAt, gaveUp: gaveUp)
         emit(.status(status))
         if changed { log("\(phase.rawValue)\(message.map { ": \($0)" } ?? "")") }
     }
+
+    /// Failed sessions before automatic retries are suspended (delays 1→30 s,
+    /// so roughly the first three minutes of an outage). A session that stayed
+    /// up longer than 60 s resets the counter.
+    private static let maxAttempts = 6
 
     private func runLoop() async {
         var attempt = 0
@@ -130,8 +136,19 @@ public actor NodeRunner {
                 continue
             }
             if Date().timeIntervalSince(began) > 60 { attempt = 0 }
-            let delay = min(30.0, pow(2.0, Double(attempt)))
             attempt += 1
+            if attempt >= Self.maxAttempts {
+                // Stop hammering an unreachable host (and flooding the log);
+                // reconnect — or opening the node's page — starts over.
+                setStatus(.offline,
+                          String(format: String(localized: "Gave up after %lld attempts — reconnect to retry"),
+                                 Self.maxAttempts),
+                          retryAt: nil, gaveUp: true)
+                await waitForWake(timeout: nil)
+                attempt = 0
+                continue
+            }
+            let delay = min(30.0, pow(2.0, Double(attempt)))
             setStatus(.offline, status.message, retryAt: Date().addingTimeInterval(delay))
             await waitForWake(timeout: delay)
         }

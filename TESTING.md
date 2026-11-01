@@ -52,6 +52,12 @@ export RPU_MAC_HOST=user@mac-a               # 只有从非 Mac 机器运行 scr
 - 修复接种数据导致的绘图溢出：接种点是静态的，应用运行超过 15 分钟后时间窗滑过它们，落在 x 域之外的点 Swift Charts 不裁剪，数据线从 y 轴左侧溢出（用户截图确认）。每次刷新时按当前窗口过滤（`t >= since`）。不用 `chartPlotStyle` + `clipped`，因为会裁掉绘图区上方的悬停提示框。
 - AetherSwitch 集成（v1）：节点配置新增"启用 AetherSwitch + mgr 目录"（`aetherDir`，默认 `~/server_mgr`），详情页头部下方新增 AetherSwitch 卡片（当前模式 + 各模式状态/切换按钮 + 全部停止，经节点自己的 ssh master 复用连接执行 `mgr`，5 秒轮询 `mgr status --json`，切换期间显示 operation 阶段）。控制接口新增 `nodes.aether`。单测 +6 项（脚本构造/目录含空格与特殊字符转义/解析/配置往返）。真机（部署了 AetherSwitch 的 GPU Linux 主机，密钥登录）：状态与模式列表正确（含中文模式名、服务 URL）；`switch` 到当前模式走 `unchanged` 无副作用分支成功；错误目录返回清晰错误；`aetherDir=off` 关闭再开启正常；`ui.render` 浅色/深色详情页渲染正常。真实跨模式切换见 E 类。
 
+## 已完成（2026-11-01）
+
+- AetherSwitch 体验修复（用户在 GB10 主机真实切换后反馈）：① 模式加载中等过渡态（loading/busy/stopping）不再把 `mgr status` 里该模式的原始探测错误（如 `Connection refused`）渲染成红色报错——它只是健康端口尚未监听，只有 unready/failed/conflict 才显示错误；② 有切换/停止操作进行时轮询加快到 2 秒；③ 操作行显示已耗时（长加载不再像卡死）；④ 动作完成后强制刷新一次（不再受轮询并发保护跳过）；⑤ aether 轮询失败与动作生命周期写入日志（`log.tail filter=aether`，同一错误只记一次）。
+- 不可达节点停止无限重试：连续 6 次失败会话（连接存活超 60 秒则重新计数）后进入"暂停自动重连"（offline + `gaveUp=true`，不再有 retryAt），日志不再被刷屏；点进该节点页面或点"重新连接"立即开始新一轮尝试。真机验证：3090wsl（当前不可达）约 2 分钟后 gaveUp、日志安静；`ui.select` 后恢复 connecting；`state` 输出新增 `gaveUp` 字段。
+- 上述两项 Swift 单测 29 项 + Python 14 项全部通过。
+
 ## 集成测试
 
 准备：

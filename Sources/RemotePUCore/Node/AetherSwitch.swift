@@ -47,6 +47,18 @@ public struct AetherStatus: Codable, Sendable, Equatable {
         public var inProgress: Bool?
         public var mode: String?
         public var error: String?
+        /// ISO-8601 start time, e.g. "2026-11-01T08:19:04.560356+00:00".
+        public var startedAt: String?
+
+        /// Parsed start date (nil when absent or unparsable).
+        public var startDate: Date? {
+            guard let startedAt else { return nil }
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = f.date(from: startedAt) { return d }
+            f.formatOptions = [.withInternetDateTime]
+            return f.date(from: startedAt)
+        }
     }
 
     public var modes: [ModeReport]

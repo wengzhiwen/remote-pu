@@ -376,6 +376,7 @@ extension AppModel {
             "phase": .string(n.status.phase.rawValue),
             "message": .from(n.status.message),
             "since": .number(n.status.since.timeIntervalSince1970.rounded()),
+            "gaveUp": .bool(n.status.gaveUp),
             "hasPassword": .bool(secrets.hasPassword(for: n.id)),
             "samples": .number(Double(n.ring.count)),
         ]

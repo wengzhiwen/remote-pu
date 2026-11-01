@@ -464,7 +464,9 @@ struct AetherSection: View {
             guard !renderPreviewMode else { return }
             while !Task.isCancelled {
                 await model.aetherRefresh(live)
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                // Poll faster while a switch/stop is visibly running.
+                let busyNow = live.aether.acting || live.aether.status?.operation?.inProgress == true
+                try? await Task.sleep(nanoseconds: busyNow ? 2_000_000_000 : 5_000_000_000)
             }
         }
     }
@@ -498,7 +500,11 @@ struct AetherSection: View {
                 if current, let url = rep?.probe?.publicUrl {
                     Text(verbatim: url).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                 }
-                if let e = rep?.error, !e.isEmpty {
+                // Only states that mean "this mode has a problem" carry the raw
+                // probe error; while loading/starting the health endpoint is
+                // simply not up yet (e.g. "Connection refused"), which would
+                // read as a failure.
+                if let e = rep?.error, !e.isEmpty, showsModeError(rep?.state) {
                     Text(verbatim: e).font(.caption2).foregroundStyle(Palette.critical).lineLimit(2)
                 }
             }
@@ -530,6 +536,13 @@ struct AetherSection: View {
         }
     }
 
+    private func showsModeError(_ state: String?) -> Bool {
+        switch state {
+        case "unready", "failed", "conflict": return true
+        default: return false
+        }
+    }
+
     private func opText(_ op: AetherStatus.Operation) -> String {
         let head: String
         switch op.action {
@@ -538,7 +551,12 @@ struct AetherSection: View {
         case "stop": head = String(localized: "Stopping")
         default: head = (op.action ?? "") + " " + (op.target ?? "")
         }
-        return head + " · " + aetherStageLabel(op.stage)
+        var text = head + " · " + aetherStageLabel(op.stage)
+        // Long model loads read as "stuck" without a moving clock.
+        if let start = op.startDate {
+            text += " · " + String(format: String(localized: "%lld s"), max(0, Int(Date().timeIntervalSince(start))))
+        }
+        return text
     }
 }
 

@@ -126,12 +126,28 @@ public struct NodeStatus: Codable, Sendable, Equatable {
     public var message: String?
     public var since: Date
     public var retryAt: Date?
+    /// Automatic retries are suspended (after repeated failures); reconnect —
+    /// or opening the node's page — starts a new attempt cycle.
+    public var gaveUp: Bool
 
-    public init(phase: NodePhase, message: String? = nil, since: Date = Date(), retryAt: Date? = nil) {
+    public init(phase: NodePhase, message: String? = nil, since: Date = Date(), retryAt: Date? = nil,
+                gaveUp: Bool = false) {
         self.phase = phase
         self.message = message
         self.since = since
         self.retryAt = retryAt
+        self.gaveUp = gaveUp
+    }
+
+    enum CodingKeys: String, CodingKey { case phase, message, since, retryAt, gaveUp }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        phase = try c.decode(NodePhase.self, forKey: .phase)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        since = try c.decodeIfPresent(Date.self, forKey: .since) ?? Date()
+        retryAt = try c.decodeIfPresent(Date.self, forKey: .retryAt)
+        gaveUp = try c.decodeIfPresent(Bool.self, forKey: .gaveUp) ?? false
     }
 }
 

@@ -221,3 +221,5 @@
 "Force stopping" = "强制停止中";
 "Node is not connected" = "节点未连接";
 "Remote commands need an ssh node" = "远程命令需要 ssh 节点";
+"%lld s" = "%lld 秒";
+"Gave up after %lld attempts — reconnect to retry" = "已重试 %lld 次未成功，暂停自动重连——点“重新连接”可再试";

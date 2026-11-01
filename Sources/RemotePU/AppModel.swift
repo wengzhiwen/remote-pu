@@ -155,6 +155,7 @@ final class AppModel: NSObject, ObservableObject {
     private var broker: AskpassBroker?
     private var control: ControlServer?
     private var maintenanceTimer: Timer?
+    private var cancellables: Set<AnyCancellable> = []
 
     @Published private(set) var nodes: [NodeLive] = []
     @Published var settings: AppSettings
@@ -244,6 +245,16 @@ final class AppModel: NSObject, ObservableObject {
                 self?.handle(e)
             }
         }
+        // Opening a node whose automatic retries were suspended starts a new
+        // attempt cycle (the user is looking at it — try again visibly).
+        $selection
+            .dropFirst()
+            .sink { [weak self] item in
+                guard case .node(let id) = item, let self,
+                      let live = self.liveByID[id], live.status.gaveUp else { return }
+                self.reconnect(id)
+            }
+            .store(in: &cancellables)
     }
 
     private func handle(_ e: NodeManagerEvent) {
@@ -450,11 +461,21 @@ final class AppModel: NSObject, ObservableObject {
 
     // MARK: - AetherSwitch
 
+    /// Last error already written to the log per node, so a persistently failing
+    /// poll logs once per message instead of once per 5 s.
+    private var aetherLoggedErrors: [String: String] = [:]
+
     /// Polls `mgr status --json` + `mgr list --json` on the node (one cheap
     /// round trip over the multiplexed master). Skips if one is in flight.
     func aetherRefresh(_ live: NodeLive) async {
-        guard live.config.kind == .ssh, let cfg = live.config.aetherSwitch else { return }
         guard !live.aether.fetching else { return }
+        await aetherFetch(live)
+    }
+
+    /// The refresh body without the in-flight guard (used after actions, where
+    /// a refresh must land even if a poll overlaps).
+    private func aetherFetch(_ live: NodeLive) async {
+        guard live.config.kind == .ssh, let cfg = live.config.aetherSwitch else { return }
         live.aether.fetching = true
         do {
             // A live-but-unhealthy mode makes the probe take up to ~35 s.
@@ -468,8 +489,14 @@ final class AppModel: NSObject, ObservableObject {
             live.aether.status = status
             live.aether.error = nil
             live.aether.updatedAt = Date()
+            aetherLoggedErrors[live.id] = nil
         } catch {
-            live.aether.error = Self.aetherErrorText(error)
+            let text = Self.aetherErrorText(error)
+            live.aether.error = text
+            if aetherLoggedErrors[live.id] != text {
+                aetherLoggedErrors[live.id] = text
+                RPULog.shared.log("aether:\(live.id)", "status failed: \(text)")
+            }
         }
         live.aether.fetching = false
     }
@@ -491,16 +518,20 @@ final class AppModel: NSObject, ObservableObject {
             script = AetherScripts.stop(dir: cfg.dir)
             timeout = 180
         }
+        RPULog.shared.log("aether:\(live.id)", "\(action) start")
+        let began = Date()
         var failure: String?
         do {
             let res = try await manager.runRemote(nodeID: live.id, script: script, timeout: timeout)
             guard res.status == 0 else {
                 throw AetherError(res.errorText.isEmpty ? "mgr exited with status \(res.status)" : res.errorText)
             }
+            RPULog.shared.log("aether:\(live.id)", "\(action) ok (\(Int(Date().timeIntervalSince(began))) s)")
         } catch {
             failure = Self.aetherErrorText(error)
+            RPULog.shared.log("aether:\(live.id)", "\(action) failed (\(Int(Date().timeIntervalSince(began))) s): \(failure!)")
         }
-        await aetherRefresh(live) // resync with the remote; the action error survives it
+        await aetherFetch(live) // resync with the remote; the action error survives it
         if let failure { live.aether.error = failure }
         live.aether.acting = false
     }

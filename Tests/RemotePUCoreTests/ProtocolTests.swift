@@ -121,6 +121,16 @@ let wslSample = #"""
         #expect(n.interval == 1)
     }
 
+    @Test func nodeStatusDecodesLegacyJSONAndRoundTrips() throws {
+        let legacy = try JSONDecoder().decode(NodeStatus.self,
+                                              from: Data(#"{"phase":"offline","message":"down","since":1793000000.0}"#.utf8))
+        #expect(legacy.phase == .offline)
+        #expect(legacy.gaveUp == false)
+        let gave = NodeStatus(phase: .offline, message: "gave up", retryAt: nil, gaveUp: true)
+        let back = try JSONDecoder().decode(NodeStatus.self, from: try JSONEncoder().encode(gave))
+        #expect(back == gave)
+    }
+
     @Test func sshConfigParsing() {
         let text = """
         Host alpha

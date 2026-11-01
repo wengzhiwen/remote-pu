@@ -54,6 +54,19 @@ import Testing
         #expect(status.operation == nil)
     }
 
+    @Test func parsesOperationStartTimestamp() throws {
+        func op(_ json: String) throws -> AetherStatus.Operation? {
+            try AetherScripts.parse(["", AetherScripts.splitMarker, "[]", AetherScripts.splitMarker,
+                                     #"{"modes": [], "operation": \#(json)}"#]).status.operation
+        }
+        let good = try op(#"{"action": "switch", "target": "m", "stage": "loading", "in_progress": true, "started_at": "2026-11-01T08:19:04.560356+00:00"}"#)
+        #expect(good?.startDate == Date(timeIntervalSince1970: 1_793_521_144.56))
+        let plain = try op(#"{"action": "switch", "started_at": "2026-11-01T08:19:04+00:00"}"#) // no fraction
+        #expect(plain?.startDate == Date(timeIntervalSince1970: 1_793_521_144))
+        let bad = try op(#"{"action": "switch", "started_at": "not a date"}"#)
+        #expect(bad?.startDate == nil)
+    }
+
     @Test func rejectsTruncatedOutput() {
         #expect((try? AetherScripts.parse(["not json"])) == nil)
         #expect((try? AetherScripts.parse([AetherScripts.splitMarker, "[]"])) == nil)
